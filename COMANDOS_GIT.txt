@@ -1,0 +1,79 @@
+COMO GUARDAR Y SUBIR CAMBIOS NUEVOS A GITHUB
+Repositorio: https://github.com/Bruno366724/CStudio
+Carpeta local: C:\Users\bruno\Desktop\AppDeCeli
+
+FLUJO NORMAL
+Abre PowerShell y ejecuta estos comandos desde cualquier carpeta:
+
+cd "C:\Users\bruno\Desktop\AppDeCeli"
+git status
+git add -A
+git status
+git diff --cached
+git commit -m "Describe brevemente los cambios"
+git push
+
+Antes del commit, revisa el segundo "git status" y "git diff --cached".
+No agregues contraseñas, tokens, archivos local.properties ni instaladores.
+El .gitignore del proyecto excluye archivos generados y el instalador de Android Studio.
+
+SI GIT DICE "NOTHING TO COMMIT"
+No hay cambios nuevos preparados para guardar. Revisa:
+
+git status
+
+Si hay archivos modificados sin preparar, repite "git add -A" y luego haz el commit.
+
+SI GIT RECHAZA EL PUSH POR CAMBIOS REMOTOS
+Integra primero los cambios de GitHub y vuelve a subir:
+
+git pull --rebase origin main
+git push
+
+Si aparecen conflictos:
+1. Ejecuta "git status" para ver los archivos en conflicto.
+2. Abre cada archivo y resuelve las secciones marcadas con
+   <<<<<<<, ======= y >>>>>>>. Guarda el archivo sin esos marcadores.
+3. Marca cada archivo resuelto y continúa:
+
+git add "ruta\del\archivo"
+git rebase --continue
+git push
+
+Para cancelar el rebase y volver al estado anterior:
+
+git rebase --abort
+
+SI GIT NO CONOCE TU NOMBRE O CORREO
+Configura el nombre y un correo asociado a tu cuenta de GitHub:
+
+git config --global user.name "Bruno"
+git config --global user.email "TU_CORREO"
+
+Después vuelve a ejecutar el comando de commit.
+
+SI PREPARASTE UN ARCHIVO POR ERROR
+Esto lo quita del próximo commit, pero conserva el archivo en tu computadora:
+
+git restore --staged "ruta\del\archivo"
+
+SI EL PUSH RECHAZA UN ARCHIVO POR SER DEMASIADO GRANDE
+No uses "git push --force". Si todavía no hiciste el commit, agrega la ruta
+del archivo a .gitignore y quítalo del área preparada sin borrarlo localmente:
+
+Add-Content -Path .gitignore -Value "nombre-del-archivo"
+git rm --cached -- "nombre-del-archivo"
+git add .gitignore
+git status
+
+Si el archivo grande ya se incluyó en un commit, .gitignore no lo elimina del
+historial. Detente y consulta antes de reescribirlo, especialmente si el commit
+ya se subió a GitHub.
+
+COMPROBAR LA RAMA Y EL REPOSITORIO REMOTO
+
+git branch --show-current
+git remote -v
+
+La rama esperada es "main" y el remoto "origin" debe apuntar a:
+https://github.com/Bruno366724/CStudio.git

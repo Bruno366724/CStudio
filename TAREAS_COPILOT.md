@@ -1,6 +1,6 @@
 # Tareas de corrección para CStudio (para GitHub Copilot)
 
-Lee primero `CONTEXTO_PROYECTO.md` (está fuera del repositorio; si no lo tienes, pídeselo al usuario). Estas tareas salen de una revisión de código **sin ejecutar nada**, así que cada una debe verificarse con pruebas antes de darla por cerrada.
+Lee primero `CONTEXTO_PROYECTO.md`. Las tareas se originaron en una revisión de código y deben considerarse terminadas solo después de pasar las pruebas indicadas.
 
 ## Reglas obligatorias (resumen del contexto)
 
@@ -166,6 +166,8 @@ El build release tiene `optimization { enable = true }` (R8) y **nunca se ha com
 3. **No inventes ni escribas contraseñas, keystores ni rutas de firma en archivos versionados.** El `.gitignore` ya excluye `*.jks` y `*.keystore`. La firma la configura el usuario; limítate a explicar los pasos en Android Studio (Build > Generate Signed App Bundle / APK) o a proponer un bloque `signingConfigs` que lea los datos desde `local.properties` (que también está ignorado).
 4. Recordar al usuario que un APK firmado en release **no se instala encima** de uno debug (la firma es distinta): hay que desinstalar el debug primero, y eso borra los proyectos guardados en esa instalación.
 
+Resultado verificado el 26/11/2026: `.\gradlew assembleRelease` compiló con R8 sin avisos de clases faltantes ni reglas keep adicionales. Se generó `app/build/outputs/apk/release/app-release-unsigned.apk`. Gradle avisó que `libandroidx.graphics.path.so` no pudo ser strippeada y la empaquetó sin modificar. También se eliminó una condición redundante que generaba un warning de Kotlin.
+
 ---
 
 ## Tareas opcionales: medir antes de tocar
@@ -204,7 +206,7 @@ En cada frame de un trazo en curso, `StrokeRenderer.replayStroke` reconstruye y 
 - [x] Tarea 2: deshacer sin historial ya no muestra "Memoria insuficiente"
 - [x] Tarea 3: autoguardado sin falsos errores, `CancellationException` relanzada
 - [x] Tarea 4: `historyBytes` consistente con el invariante
-- [ ] Tarea 5: `assembleRelease` compila y se reportó el resultado
-- [ ] `.\gradlew assembleDebug` exitoso
-- [ ] `.\gradlew connectedDebugAndroidTest` exitoso (todas las pruebas, incluidas las nuevas)
+- [x] Tarea 5: `assembleRelease` compila y se reportó el resultado
+- [x] `.\gradlew assembleDebug` exitoso
+- [x] `.\gradlew connectedDebugAndroidTest` exitoso (26 pruebas; todas aprobadas)
 - [ ] Validación manual con S Pen real en la tableta Samsung (pendiente, la hace el usuario)

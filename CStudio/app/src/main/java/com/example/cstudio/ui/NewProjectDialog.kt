@@ -160,7 +160,7 @@ private data class CanvasPreset(val label: String, val width: Int, val height: I
 
 private fun dimensionError(text: String, value: Int?): String? {
     if (text.isEmpty() || value == null) return "Ingresa una dimensión."
-    if (value == null || !CanvasDimensions.isValidSide(value)) {
+    if (!CanvasDimensions.isValidSide(value)) {
         return "Debe estar entre 64 y 4096 px."
     }
     return null

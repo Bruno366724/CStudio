@@ -1,0 +1,389 @@
+package com.example.cstudio.drawing
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
+import android.util.AttributeSet
+import android.view.MotionEvent
+import android.view.View
+import com.example.cstudio.CanvasDimensions
+import com.example.cstudio.brush.Brush
+import com.example.cstudio.brush.BrushSettings
+import com.example.cstudio.brush.Brushes
+import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.min
+
+/**
+ * Vista clásica del lienzo; coordina entrada, viewport, renderizado e historial.
+ *
+ * Cómo funciona ahora:
+ *  - El dibujo vive en un Bitmap transparente de tamaño fijo (la futura "capa").
+ *  - El trazo EN CURSO no se pinta en ese Bitmap: se guarda como lista de puntos
+ *    (x, y, ancho) y se redibuja en cada onDraw directamente sobre el canvas de la
+ *    pantalla (acelerado por GPU), usando las coordenadas del lienzo.
+ *  - Al soltar el lápiz, el trazo se "confirma": se pinta una sola vez en el Bitmap.
+ *
+ * Por qué así: cada vez que un Bitmap cambia, Android tiene que volver a subirlo
+ * entero a la GPU. Si lo modificáramos en cada evento del lápiz, en una tableta
+ * grande se notaría lento. Así el Bitmap cambia una sola vez por trazo.
+ * Además nos da la opacidad correcta (sin zonas más oscuras donde se superponen
+ * los segmentos) y el trazo como unidad, que es lo que necesita "deshacer".
+ */
+class DrawingView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null,
+    defStyleAttr: Int = 0
+) : View(context, attrs, defStyleAttr) {
+
+    private val density = resources.displayMetrics.density
+
+    // Los ajustes se leen al iniciar cada trazo.
+    var brushSettings = BrushSettings(Color.BLACK, 12f, 1f, Brushes.PENCIL)
+    var onStrokeCommitted: (() -> Unit)? = null
+
+    private var currentCanvasWidth = CanvasDimensions.DEFAULT_WIDTH
+    private var currentCanvasHeight = CanvasDimensions.DEFAULT_HEIGHT
+    private var layerBitmap = Bitmap.createBitmap(
+        currentCanvasWidth,
+        currentCanvasHeight,
+        Bitmap.Config.ARGB_8888
+    )
+    private var layerCanvas = Canvas(layerBitmap)
+    private var viewport = Viewport(currentCanvasWidth, currentCanvasHeight)
+    private var strokeRenderer = StrokeRenderer(currentCanvasWidth, currentCanvasHeight)
+
+    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    private val paperPaint = Paint().apply { color = Color.WHITE }
+    private val backgroundColor = Color.LTGRAY
+    private val backgroundPaint = Paint().apply { color = backgroundColor }
+
+    // Trazo en curso: puntos con su ancho ya suavizado
+    private var isDrawing = false
+    private var pointsX = FloatArray(256)
+    private var pointsY = FloatArray(256)
+    private var pointsW = FloatArray(256)
+    private var pointCount = 0
+
+    // Ajustes "congelados" al empezar el trazo
+    private var strokeColor = Color.BLACK
+    private var strokeOpacity = 1f
+    private var strokeBrush: Brush = Brushes.PENCIL
+    private var strokeSizeDp = 12f
+    private var strokeStartedWithFinger = false
+    private var isTransforming = false
+
+    private var history = History(layerBitmap)
+
+    var onMemoryError: (() -> Unit)? = null
+
+    val canvasWidth: Int
+        get() = currentCanvasWidth
+
+    val canvasHeight: Int
+        get() = currentCanvasHeight
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (w <= 0 || h <= 0) return
+        resetViewport()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), backgroundPaint)
+        canvas.save()
+        canvas.concat(viewport.matrix)
+        canvas.clipRect(0f, 0f, currentCanvasWidth.toFloat(), currentCanvasHeight.toFloat())
+        canvas.drawRect(0f, 0f, currentCanvasWidth.toFloat(), currentCanvasHeight.toFloat(), paperPaint)
+
+        // Sin trazo en curso: solo se muestra el dibujo terminado.
+        if (pointCount == 0) {
+            canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
+            canvas.restore()
+            return
+        }
+
+        strokeRenderer.preparePaint(strokeColor, strokeBrush.isEraser)
+        if (strokeBrush.isEraser) {
+            // Vista previa del borrador: se "borra" sobre una copia temporal de la capa.
+            val bounds = strokeBounds()
+            val save = strokeRenderer.saveLayer(canvas, bounds)
+            canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
+            strokeRenderer.replayStroke(canvas, pointsX, pointsY, pointsW, pointCount)
+            canvas.restoreToCount(save)
+        } else {
+            canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
+            strokeRenderer.drawBrushStroke(
+                canvas, strokeOpacity, pointsX, pointsY, pointsW, pointCount, strokeBounds()
+            )
+        }
+        canvas.restore()
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val isStylus = event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                isTransforming = false
+                val point = viewport.mapToCanvas(event.x, event.y)
+                if (!viewport.isInsideCanvas(point[0], point[1])) {
+                    isDrawing = false
+                    pointCount = 0
+                    return true
+                }
+                startStroke(
+                    point[0],
+                    point[1],
+                    event.pressure,
+                    isStylus,
+                    event.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER
+                )
+                invalidate()
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                if (isTransforming && event.pointerCount >= 2) {
+                    viewport.updateGesture(event)
+                    invalidate()
+                    return true
+                }
+                if (!isDrawing) return true
+                // Android agrupa varios puntos en un solo evento: los "históricos"
+                // son los intermedios. Si se ignoran, las líneas salen quebradas.
+                for (i in 0 until event.historySize) {
+                    val point = viewport.mapToCanvas(
+                        event.getHistoricalX(i),
+                        event.getHistoricalY(i)
+                    )
+                    addPoint(
+                        point[0],
+                        point[1],
+                        widthFor(event.getHistoricalPressure(i), isStylus, strokeBrush, strokeSizeDp)
+                    )
+                }
+                val point = viewport.mapToCanvas(event.x, event.y)
+                addPoint(
+                    point[0],
+                    point[1],
+                    widthFor(event.pressure, isStylus, strokeBrush, strokeSizeDp)
+                )
+                invalidate()
+            }
+
+            MotionEvent.ACTION_UP -> {
+                if (isDrawing) {
+                    val point = viewport.mapToCanvas(event.x, event.y)
+                    addPoint(
+                        point[0],
+                        point[1],
+                        widthFor(event.pressure, isStylus, strokeBrush, strokeSizeDp)
+                    )
+                    finishStroke()
+                }
+                isTransforming = false
+            }
+
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (event.pointerCount >= 2) {
+                    if (strokeStartedWithFinger) cancelStroke() else finishStroke()
+                    isTransforming = true
+                    viewport.beginGesture(event)
+                }
+            }
+
+            MotionEvent.ACTION_POINTER_UP -> isTransforming = false
+
+            // CANCEL suele ser la palma o el sistema: se descarta el trazo.
+            MotionEvent.ACTION_CANCEL -> {
+                cancelStroke()
+                isTransforming = false
+            }
+        }
+        return true
+    }
+
+    /** Borra todo el dibujo. */
+    fun clear() {
+        try {
+            history.clear()
+        } catch (error: OutOfMemoryError) {
+            onMemoryError?.invoke()
+            return
+        }
+        isDrawing = false
+        pointCount = 0
+        invalidate()
+        onStrokeCommitted?.invoke()
+    }
+
+    fun undo() {
+        if (history.undo()) {
+            invalidate()
+            onStrokeCommitted?.invoke()
+        }
+    }
+
+    fun redo() {
+        if (history.redo()) {
+            invalidate()
+            onStrokeCommitted?.invoke()
+        }
+    }
+
+    fun snapshotLayer(): Bitmap {
+        return layerBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            ?: throw IllegalStateException("No se pudo copiar la capa.")
+    }
+
+    fun replaceLayer(bitmap: Bitmap, takeOwnership: Boolean = false) {
+        require(CanvasDimensions.isValid(bitmap.width, bitmap.height)) {
+            "El lienzo debe medir entre 64 y 4096 píxeles por lado."
+        }
+        val replacement = if (takeOwnership) {
+            bitmap
+        } else {
+            Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888).also {
+                Canvas(it).drawBitmap(bitmap, 0f, 0f, null)
+            }
+        }
+        val replacementCanvas = Canvas(replacement)
+        val replacementViewport = Viewport(replacement.width, replacement.height)
+        val replacementRenderer = StrokeRenderer(replacement.width, replacement.height)
+        val replacementHistory = History(replacement)
+        val previousBitmap = layerBitmap
+
+        cancelStroke()
+        history.reset()
+        layerBitmap = replacement
+        layerCanvas = replacementCanvas
+        currentCanvasWidth = replacement.width
+        currentCanvasHeight = replacement.height
+        viewport = replacementViewport
+        strokeRenderer = replacementRenderer
+        history = replacementHistory
+        if (previousBitmap !== replacement) previousBitmap.recycle()
+        resetViewport()
+        invalidate()
+    }
+
+    fun resetViewport() {
+        if (width <= 0 || height <= 0) return
+        viewport.reset(width, height)
+        invalidate()
+    }
+
+    // ---------------------------------------------------------------- trazo
+
+    // Con el dedo no hay presión confiable: se usa el tamaño completo.
+    // Con el lápiz el ancho varía entre el 15% y el 100% del tamaño elegido.
+    private fun widthFor(pressure: Float, isStylus: Boolean, brush: Brush, sizeDp: Float): Float {
+        val p = if (brush.usesPressure && isStylus) pressure.coerceIn(0f, 1f) else 1f
+        return sizeDp * density / viewport.fitScale *
+            (brush.minWidthRatio + (1f - brush.minWidthRatio) * p)
+    }
+
+    private fun startStroke(
+        x: Float,
+        y: Float,
+        pressure: Float,
+        isStylus: Boolean,
+        isFinger: Boolean
+    ) {
+        isDrawing = true
+        strokeBrush = brushSettings.brush
+        strokeSizeDp = brushSettings.sizeDp
+        strokeColor = brushSettings.color
+        strokeOpacity = brushSettings.opacity
+        strokeStartedWithFinger = isFinger
+        pointCount = 0
+        recordPoint(x, y, widthFor(pressure, isStylus, strokeBrush, strokeSizeDp))
+    }
+
+    private fun addPoint(x: Float, y: Float, targetWidth: Float) {
+        val last = pointCount - 1
+        if (last < 0) return
+        // Ignora movimientos mínimos (evita segmentos de largo casi cero).
+        if (abs(x - pointsX[last]) < 0.5f && abs(y - pointsY[last]) < 0.5f) return
+
+        // Suaviza los cambios bruscos de presión para que el ancho no "salte".
+        val width = pointsW[last] + (targetWidth - pointsW[last]) * 0.35f
+        recordPoint(x, y, width)
+    }
+
+    private fun recordPoint(x: Float, y: Float, w: Float) {
+        if (pointCount == pointsX.size) {
+            val newSize = pointCount * 2
+            pointsX = pointsX.copyOf(newSize)
+            pointsY = pointsY.copyOf(newSize)
+            pointsW = pointsW.copyOf(newSize)
+        }
+        pointsX[pointCount] = x
+        pointsY[pointCount] = y
+        pointsW[pointCount] = w
+        pointCount++
+    }
+
+    /** Pasa el trazo en curso al Bitmap (se hace una sola vez por trazo). */
+    private fun finishStroke() {
+        if (!isDrawing) return
+        isDrawing = false
+        if (pointCount > 0) {
+            val bounds = strokeBounds()
+            var before: Bitmap? = null
+            try {
+                before = history.capture(bounds)
+                strokeRenderer.preparePaint(strokeColor, strokeBrush.isEraser)
+                if (strokeBrush.isEraser) {
+                    strokeRenderer.replayStroke(layerCanvas, pointsX, pointsY, pointsW, pointCount)
+                } else {
+                    strokeRenderer.drawBrushStroke(
+                        layerCanvas, strokeOpacity, pointsX, pointsY, pointsW, pointCount, bounds
+                    )
+                }
+                history.commit(bounds, checkNotNull(before))
+                before = null
+                onStrokeCommitted?.invoke()
+            } catch (error: OutOfMemoryError) {
+                before?.recycle()
+                onMemoryError?.invoke()
+            }
+        }
+        pointCount = 0
+        invalidate()
+    }
+
+    private fun strokeBounds(): Rect {
+        var minX = pointsX[0]
+        var maxX = pointsX[0]
+        var minY = pointsY[0]
+        var maxY = pointsY[0]
+        var maxWidth = pointsW[0]
+        for (i in 1 until pointCount) {
+            minX = min(minX, pointsX[i])
+            maxX = maxOf(maxX, pointsX[i])
+            minY = min(minY, pointsY[i])
+            maxY = maxOf(maxY, pointsY[i])
+            maxWidth = maxOf(maxWidth, pointsW[i])
+        }
+        val padding = maxWidth / 2f + 2f
+        val left = floor(minX - padding).toInt().coerceIn(0, currentCanvasWidth - 1)
+        val top = floor(minY - padding).toInt().coerceIn(0, currentCanvasHeight - 1)
+        val right = ceil(maxX + padding).toInt().coerceIn(left + 1, currentCanvasWidth)
+        val bottom = ceil(maxY + padding).toInt().coerceIn(top + 1, currentCanvasHeight)
+        return Rect(left, top, right, bottom)
+    }
+
+    private fun cancelStroke() {
+        isDrawing = false
+        pointCount = 0
+        invalidate()
+    }
+}

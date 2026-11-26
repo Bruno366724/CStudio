@@ -1,0 +1,11 @@
+.gradle/
+.kotlin/
+**/build/
+local.properties
+.idea/
+*.iml
+.externalNativeBuild/
+.cxx/
+*.jks
+*.keystore
+android-studio-rabbit2-patch2-windows.exe

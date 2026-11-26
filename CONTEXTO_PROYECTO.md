@@ -100,7 +100,7 @@ El contenido dibujado vive en un `Bitmap` ARGB_8888 mutable administrado por `Dr
 
 ## Selector de color y cuentagotas
 
-Implementado el 26/11/2026 en Kotlin/Compose, sin dependencias externas:
+Implementados y probados el 26/11/2026 en Kotlin/Compose, sin dependencias externas:
 
 - `color/ColorUtils.kt` ofrece parseo y formato HEX (incluyendo alfa) y conversiones RGB, HSL y HSV/HSB.
 - El selector ofrece modos rueda HSV, cuadro HSV y valores; entrada HEX/RGB/HSB, alfa, vista previa, copia y colores recientes. La rueda y los controles exponen semántica accesible y admiten interacción táctil y teclado.
@@ -109,7 +109,7 @@ Implementado el 26/11/2026 en Kotlin/Compose, sin dependencias externas:
 - El cuentagotas toma muestras del bitmap del lienzo respetando el viewport, zoom y desplazamiento; los píxeles transparentes se componen sobre blanco. Se puede cancelar con el botón o Atrás. Si se toca fuera del lienzo, avisa y mantiene el modo activo.
 - El `AndroidView` del lienzo está recortado a sus límites para que un lienzo ampliado no cubra el HUD.
 
-Alcance pendiente: el cuentagotas solo muestrea el lienzo (no imágenes ni la pantalla global) y todavía no hay paletas personalizadas guardadas. La interacción con S Pen/tableta no se ha validado manualmente.
+Alcance pendiente de estas funciones: no se pueden guardar paletas personalizadas ni tomar muestras desde imágenes o desde otras apps. El selector HSV y el cuentagotas del lienzo sí están implementados; la interacción con S Pen/tableta todavía no se ha validado manualmente.
 
 ## Pinceles
 
@@ -151,7 +151,7 @@ Formato JSON:
 
 - Versión 1: un único `canvasSize`.
 - Versión 2: `canvasWidth` y `canvasHeight` separados.
-- La lista `layers` ya existe y es extensible, aunque la UI/editor actual solo soporta una capa.
+- El formato JSON y `ProjectStorage` admiten una lista de capas y pueden guardar/cargar esa lista; un proyecto nuevo se inicializa con una. Esto no significa que exista edición multicapa: la UI y `DrawingView` actualmente muestran y modifican una sola capa.
 
 `ProjectStorage`:
 
@@ -211,7 +211,7 @@ Antes de implementar una función que afecte la arquitectura (capas, zoom, anima
 - [ ] Lienzos de tamaños predefinidos (cuadrado, vertical, 16:9) y papel de colores o cuadriculado
 
 ## Decisiones de diseño
-- Cada capa es un `Bitmap` ARGB_8888. El trazo en curso se guarda como lista de puntos (x, y, ancho) y se redibuja en `onDraw` (acelerado por GPU, con `saveLayerAlpha` para aplicar la opacidad al trazo completo); al soltar el lápiz se "confirma" pintándolo una sola vez en el bitmap de la capa activa. El borrador usa `PorterDuff.Mode.DST_OUT`.
+- El modelo JSON y `ProjectStorage` están preparados para una lista de capas, pero la interfaz/editor solo exponen una capa editable; todavía no hay controles para crear, seleccionar, ocultar, ordenar o cambiar la opacidad de varias capas. En el editor actual hay un único bitmap ARGB_8888 editable. Sobre ese bitmap, el trazo en curso se guarda como lista de puntos (x, y, ancho) y se redibuja en `onDraw` (acelerado por GPU, con `saveLayerAlpha` para aplicar la opacidad al trazo completo); al soltar el lápiz se confirma pintándolo una sola vez. El borrador usa `PorterDuff.Mode.DST_OUT`.
 - Tamaño inicial predeterminado del lienzo: 1920 × 1080; cada proyecto admite dimensiones de 64 a 4096 px por lado.
 - Entrada del lápiz: `MotionEvent.getPressure()`, `getHistoricalX/Y` (puntos intermedios) y `getToolType()`.
   - `TOOL_TYPE_STYLUS` dibuja.
@@ -222,7 +222,7 @@ Antes de implementar una función que afecte la arquitectura (capas, zoom, anima
 - Zoom y pan con `Matrix`.
 - Guardado: almacenamiento interno de la app. Exportar PNG, JPG, WEBP y PDF con `MediaStore`.
 - Los proyectos viven en `filesDir/projects/<uuid>` con metadatos JSON versionados, capas PNG ARGB_8888 y miniaturas de 256×256. El autosave usa debounce de 2 segundos y también guarda al pausar la Activity.
-- El JSON ya contiene una lista de capas extensible; por ahora la interfaz solo abre y edita proyectos de una capa.
+- El JSON y `ProjectStorage` conservan listas de capas extensibles; la interfaz/editor solo abre y edita una capa por proyecto. No asumir que las capas adicionales ya son visibles o editables desde la app.
 - Rendimiento: no crear objetos dentro de `onDraw` ni de `onTouchEvent` (reutilizar `Path` y `Paint`). El `Bitmap` de la capa solo se modifica al terminar cada trazo, porque cada cambio obliga a subirlo completo a la GPU (no modificarlo en cada evento del lápiz). Usar `invalidate()` simple: el rectángulo sucio (`invalidate(l, t, r, b)`) está deprecado y Android moderno lo ignora.
 
 ## Cómo quiero que me ayudes (modo emergencia)
@@ -315,7 +315,6 @@ La suite está en:
 - Migración v1 a v2.
 - Dimensiones de lienzo.
 - Historial en lienzo 4096 × 4096.
-- Cambio de capa.
 - Proyecto dañado y recuperación.
 - Ordenamiento, borrado y renombrado.
 - Debounce del autosave.
@@ -345,6 +344,8 @@ Hecho y probado en el celular:
 - [x] Pincel con color, tamaño y opacidad
 - [x] Borrador
 - [x] Barra de herramientas (colores, tamaño, opacidad, pincel/borrador, limpiar)
+- [x] Selector HSV con rueda/cuadro, campos HEX/RGB/HSB, alfa e historial reciente
+- [x] Cuentagotas del lienzo con zoom/pan, cancelación y aviso al tocar fuera
 - [x] Deshacer/rehacer
 - [x] Zoom y desplazamiento con dos dedos; botón Ajustar
 - [x] Autoguardado, carga del último proyecto y recuperación con proyecto nuevo ante archivos dañados
@@ -354,6 +355,7 @@ Hecho y probado en el celular:
 - [x] Diálogo de nuevo proyecto con presets y tamaño personalizado
 - [x] Exportación PNG/JPG/WEBP a Pictures/CStudio y PDF a Documents/CStudio; Android 8–9 solicita permiso de almacenamiento
 - [x] Pruebas instrumentadas de persistencia/recuperación, debounce, tamaños, migración, exportación, historial, Home y diálogo de creación
+- [x] Pruebas de conversiones de color, entradas del selector, alfa, historial y cuentagotas
 - [x] Carga mutable de capas desde disco y conversión segura a ARGB_8888
 - [x] Vista previa del borrador sin ocultar el resto del dibujo
 - [x] Guardado/exportación no cancelables con reciclado controlado de snapshots
@@ -374,9 +376,10 @@ Sin errores conocidos en las pruebas conectadas ejecutadas en el Moto G85.
 
 ## Limitaciones conocidas y trabajo que puede parecer hecho pero no está terminado
 
-- El sistema de capas existe solo en el modelo JSON; no hay UI ni edición multicapa.
-- No hay selector HSV completo, cuentagotas, estabilizador, relleno, formas ni transformaciones.
-- No hay botón S Pen, curva de presión ni rechazo avanzado de palma probado.
+- El formato JSON y `ProjectStorage` admiten listas de capas y pueden guardarlas/cargarlas; la interfaz/editor solo muestra y modifica una capa. No hay controles de gestión multicapa.
+- El selector HSV y el cuentagotas del lienzo sí existen. Siguen pendientes las paletas personalizadas guardadas y el muestreo desde imágenes o desde otras apps.
+- No hay estabilizador, relleno, formas ni transformaciones.
+- No hay acción configurable para el botón del S Pen ni editor de curva de presión; el rechazo de palma aún no se ha validado en la tableta Samsung.
 - No hay línea de tiempo ni animación.
 - No hay copia de seguridad/exportación masiva de proyectos.
 - El APK release firmado todavía no está preparado.

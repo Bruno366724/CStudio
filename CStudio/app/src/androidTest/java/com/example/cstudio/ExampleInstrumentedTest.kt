@@ -12,6 +12,9 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.example.cstudio.brush.BrushSettings
+import com.example.cstudio.brush.Brushes
+import com.example.cstudio.color.RecentColorsRepository
 import com.example.cstudio.drawing.DrawingView
 import com.example.cstudio.drawing.History
 import com.example.cstudio.storage.AutoSaveDebouncer
@@ -124,6 +127,164 @@ class ExampleInstrumentedTest {
         assertEquals(Color.LTGRAY, committed.getPixel(250, 45))
         assertEquals(Color.WHITE, committed.getPixel(250, 200))
         assertEquals(Color.BLACK, committed.getPixel(250, 245))
+    }
+
+    @Test
+    fun colorAlphaAndBrushOpacityApplyToPreviewAndCommittedStroke() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        lateinit var view: DrawingView
+        var downTime = 0L
+        instrumentation.runOnMainSync {
+            view = DrawingView(instrumentation.targetContext)
+            view.layout(0, 0, 500, 500)
+            view.brushSettings = BrushSettings(
+                color = 0x80FF0000.toInt(),
+                sizeDp = 12f,
+                opacity = 0.5f,
+                brush = Brushes.PENCIL
+            )
+            downTime = SystemClock.uptimeMillis()
+            dispatchTouch(
+                view, downTime, downTime, MotionEvent.ACTION_DOWN,
+                floatArrayOf(250f), floatArrayOf(250f)
+            )
+        }
+
+        val preview = drawView(view)
+        val previewPixel = preview.getPixel(250, 250)
+        assertTrue(Color.green(previewPixel) in 190..193)
+        assertTrue(Color.blue(previewPixel) in 190..193)
+
+        instrumentation.runOnMainSync {
+            dispatchTouch(
+                view, downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP,
+                floatArrayOf(250f), floatArrayOf(250f)
+            )
+        }
+        val layer = view.snapshotLayer()
+        try {
+            val committedPixel = layer.getPixel(view.canvasWidth / 2, view.canvasHeight / 2)
+            assertEquals(64, Color.alpha(committedPixel))
+            assertEquals(255, Color.red(committedPixel))
+            assertEquals(0, Color.green(committedPixel))
+            assertEquals(0, Color.blue(committedPixel))
+        } finally {
+            layer.recycle()
+            preview.recycle()
+        }
+    }
+
+    @Test
+    fun eyedropperSamplesCanvasPaperAndReportsTapsOutsideIt() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        lateinit var view: DrawingView
+        val sampledColors = mutableListOf<Int?>()
+        instrumentation.runOnMainSync {
+            view = DrawingView(instrumentation.targetContext)
+            view.layout(0, 0, 600, 500)
+            view.brushSettings = BrushSettings(
+                color = Color.RED,
+                sizeDp = 12f,
+                opacity = 1f,
+                brush = Brushes.PENCIL
+            )
+            view.onEyedropperResult = { sampledColors.add(it) }
+            val downTime = SystemClock.uptimeMillis()
+            dispatchTouch(
+                view, downTime, downTime, MotionEvent.ACTION_DOWN,
+                floatArrayOf(300f), floatArrayOf(250f)
+            )
+            dispatchTouch(
+                view, downTime, downTime + 10, MotionEvent.ACTION_UP,
+                floatArrayOf(300f), floatArrayOf(250f)
+            )
+
+            view.eyedropperEnabled = true
+            val sampleTime = downTime + 20
+            dispatchTouch(
+                view, sampleTime, sampleTime, MotionEvent.ACTION_DOWN,
+                floatArrayOf(300f), floatArrayOf(250f)
+            )
+            dispatchTouch(
+                view, sampleTime, sampleTime + 10, MotionEvent.ACTION_UP,
+                floatArrayOf(300f), floatArrayOf(250f)
+            )
+            assertFalse(view.eyedropperEnabled)
+
+            view.eyedropperEnabled = true
+            val paperTime = downTime + 40
+            dispatchTouch(
+                view, paperTime, paperTime, MotionEvent.ACTION_DOWN,
+                floatArrayOf(150f), floatArrayOf(250f)
+            )
+            dispatchTouch(
+                view, paperTime, paperTime + 10, MotionEvent.ACTION_UP,
+                floatArrayOf(150f), floatArrayOf(250f)
+            )
+            assertFalse(view.eyedropperEnabled)
+
+            view.eyedropperEnabled = true
+            val outsideTime = downTime + 60
+            dispatchTouch(
+                view, outsideTime, outsideTime, MotionEvent.ACTION_DOWN,
+                floatArrayOf(300f), floatArrayOf(10f)
+            )
+        }
+
+        assertEquals(listOf(Color.RED, Color.WHITE, null), sampledColors)
+        assertTrue(view.eyedropperEnabled)
+    }
+
+    @Test
+    fun recentColorsAreDeduplicatedCappedAndPersisted() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val preferencesName = "recent-colors-test-${UUID.randomUUID()}"
+        val preferences = context.getSharedPreferences(preferencesName, 0)
+        val repository = RecentColorsRepository(preferences)
+        val red = 0xFFFF0000.toInt()
+        val blue = 0xFF0000FF.toInt()
+        val green = 0xFF00FF00.toInt()
+
+        try {
+            repository.addColor(red, maxItems = 3)
+            repository.addColor(blue, maxItems = 3)
+            repository.addColor(red, maxItems = 3)
+            repository.addColor(green, maxItems = 3)
+
+            val reopenedRepository = RecentColorsRepository(
+                context.getSharedPreferences(preferencesName, 0)
+            )
+            assertEquals(listOf(green, red, blue), reopenedRepository.getRecentColors(3))
+
+            reopenedRepository.saveLastColor(0x80FFFFFF.toInt())
+            assertEquals(
+                0x80FFFFFF.toInt(),
+                RecentColorsRepository(context.getSharedPreferences(preferencesName, 0))
+                    .getLastColor(defaultColor = 0)
+            )
+        } finally {
+            preferences.edit().clear().commit()
+        }
+    }
+
+    @Test
+    fun recentColorsIgnoreInvalidStoredEntriesAndRecoverFromCorruptJson() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val preferences = context.getSharedPreferences("recent-colors-corrupt-test-${UUID.randomUUID()}", 0)
+        val repository = RecentColorsRepository(preferences)
+        val red = 0xFFFF0000.toInt()
+        try {
+            preferences.edit()
+                .putString("cstudio_recent_colors", """["#F00","not-a-color",42,"#F00F"]""")
+                .commit()
+            assertEquals(listOf(red), repository.getRecentColors())
+
+            preferences.edit().putString("cstudio_recent_colors", "{broken").commit()
+            assertTrue(repository.getRecentColors().isEmpty())
+            assertEquals(0xFF000000.toInt(), repository.getLastColor(0xFF000000.toInt()))
+        } finally {
+            preferences.edit().clear().commit()
+        }
     }
 
     @Test

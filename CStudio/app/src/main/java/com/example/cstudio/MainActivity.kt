@@ -13,22 +13,32 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.example.cstudio.brush.BrushSettings
 import com.example.cstudio.brush.Brushes
+import com.example.cstudio.color.RecentColorsRepository
 import com.example.cstudio.drawing.DrawingView
 import com.example.cstudio.storage.AutoSaveDebouncer
 import com.example.cstudio.storage.ExportFormat
@@ -38,6 +48,7 @@ import com.example.cstudio.storage.ImageExporter
 import com.example.cstudio.storage.ProjectMetadata
 import com.example.cstudio.storage.ProjectStorage
 import com.example.cstudio.storage.StoredProject
+import com.example.cstudio.ui.ColorPickerDialog
 import com.example.cstudio.ui.ExportDialog
 import com.example.cstudio.ui.HomeScreen
 import com.example.cstudio.ui.NewProjectDialog
@@ -62,6 +73,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var drawingView: DrawingView
     private lateinit var projectStorage: ProjectStorage
     private lateinit var autoSaveDebouncer: AutoSaveDebouncer
+    private lateinit var recentColorsRepository: RecentColorsRepository
     private var currentProject: ProjectMetadata? = null
     private var projectReady = false
     private var restoredProjectId: String? = null
@@ -70,6 +82,8 @@ class MainActivity : ComponentActivity() {
     private var homeLoading by mutableStateOf(true)
     private var newProjectDialogVisible by mutableStateOf(false)
     private var exportDialogVisible by mutableStateOf(false)
+    private var colorPickerDialogVisible by mutableStateOf(false)
+    private var eyedropperMode by mutableStateOf(false)
     private var pendingExportOptions: ExportOptions? = null
     private var isBusy = false
     private var dirty = false
@@ -91,6 +105,9 @@ class MainActivity : ComponentActivity() {
         drawingView = DrawingView(this)
         drawingView.onMemoryError = ::showMemoryError
         projectStorage = ProjectStorage(filesDir)
+        recentColorsRepository = RecentColorsRepository(
+            getSharedPreferences(COLOR_PREFERENCES_NAME, MODE_PRIVATE)
+        )
         autoSaveDebouncer = AutoSaveDebouncer(lifecycleScope, AUTO_SAVE_DELAY_MS) {
             saveCurrentProject()
         }
@@ -108,6 +125,11 @@ class MainActivity : ComponentActivity() {
                     newProjectDialogVisible = false
                 } else if (exportDialogVisible) {
                     exportDialogVisible = false
+                } else if (colorPickerDialogVisible) {
+                    colorPickerDialogVisible = false
+                } else if (eyedropperMode) {
+                    eyedropperMode = false
+                    drawingView.eyedropperEnabled = false
                 } else if (currentScreen == MainScreen.EDITOR) {
                     lifecycleScope.launch { navigateHome() }
                 } else {
@@ -129,15 +151,41 @@ class MainActivity : ComponentActivity() {
                         Toast.makeText(this, "Se necesita permiso para guardar el archivo.", Toast.LENGTH_LONG).show()
                     }
                 }
+                var recentColors by remember {
+                    mutableStateOf(recentColorsRepository.getRecentColors())
+                }
                 var brushSettings by remember {
                     mutableStateOf(
                     BrushSettings(
-                        color = Color.Black.toArgb(),
+                        color = recentColorsRepository.getLastColor(Color.Black.toArgb()),
                         sizeDp = 12f,
                         opacity = 1f,
                         brush = Brushes.PENCIL
                     )
                     )
+                }
+                val onColorSelectionFinished: (Int) -> Unit = { selectedColor ->
+                    recentColorsRepository.addColor(selectedColor)
+                    recentColorsRepository.saveLastColor(selectedColor)
+                    recentColors = recentColorsRepository.getRecentColors()
+                }
+                androidx.compose.runtime.SideEffect {
+                    drawingView.onEyedropperResult = { color ->
+                        if (color == null) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Toca dentro del lienzo para tomar un color.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            eyedropperMode = false
+                            brushSettings = brushSettings.copy(
+                                color = color,
+                                brush = Brushes.PENCIL
+                            )
+                            onColorSelectionFinished(color)
+                        }
+                    }
                 }
 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -153,6 +201,30 @@ class MainActivity : ComponentActivity() {
                         )
                     } else {
                         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+                            if (eyedropperMode) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.secondaryContainer)
+                                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "Toca el lienzo para tomar un color.",
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            eyedropperMode = false
+                                            drawingView.eyedropperEnabled = false
+                                        }
+                                    ) {
+                                        Text("Cancelar")
+                                    }
+                                }
+                            }
                             ToolBar(
                                 settings = brushSettings,
                                 onSettingsChange = { brushSettings = it },
@@ -161,10 +233,16 @@ class MainActivity : ComponentActivity() {
                                 onRedo = { drawingView.redo() },
                                 onResetViewport = { drawingView.resetViewport() },
                                 onExport = { exportDialogVisible = true },
-                                onHome = { lifecycleScope.launch { navigateHome() } }
+                                onHome = {
+                                    eyedropperMode = false
+                                    drawingView.eyedropperEnabled = false
+                                    lifecycleScope.launch { navigateHome() }
+                                },
+                                onColorSelectionFinished = onColorSelectionFinished,
+                                onOpenColorPicker = { colorPickerDialogVisible = true }
                             )
                             AndroidView(
-                                modifier = Modifier.fillMaxWidth().weight(1f),
+                                modifier = Modifier.fillMaxWidth().weight(1f).clipToBounds(),
                                 factory = { drawingView },
                                 update = { view -> view.brushSettings = brushSettings }
                             )
@@ -195,6 +273,37 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     exportDrawing(options)
                                 }
+                            }
+                        )
+                    }
+                    if (colorPickerDialogVisible && currentScreen == MainScreen.EDITOR) {
+                        ColorPickerDialog(
+                            argb = brushSettings.color,
+                            recentColors = recentColors,
+                            onColorChanged = { color ->
+                                brushSettings = brushSettings.copy(
+                                    color = color,
+                                    brush = Brushes.PENCIL
+                                )
+                            },
+                            onSelectionFinished = onColorSelectionFinished,
+                            onClearHistory = {
+                                recentColorsRepository.clearHistory()
+                                recentColors = emptyList()
+                            },
+                            onRequestEyedropper = {
+                                colorPickerDialogVisible = false
+                                eyedropperMode = true
+                                drawingView.eyedropperEnabled = true
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Toca el lienzo para tomar un color.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            onDismiss = {
+                                onColorSelectionFinished(brushSettings.color)
+                                colorPickerDialogVisible = false
                             }
                         )
                     }
@@ -577,6 +686,7 @@ class MainActivity : ComponentActivity() {
         const val AUTO_SAVE_DELAY_MS = 2_000L
         const val STATE_SCREEN = "screen"
         const val STATE_PROJECT_ID = "project_id"
+        const val COLOR_PREFERENCES_NAME = "cstudio_color_picker"
         const val TAG = "MainActivity"
     }
 }

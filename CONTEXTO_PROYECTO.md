@@ -98,6 +98,19 @@ El contenido dibujado vive en un `Bitmap` ARGB_8888 mutable administrado por `Dr
 - Limita el pan para mantener una parte visible del lienzo.
 - Conserva o adapta relativamente zoom/pan al cambiar el tamaño de la vista.
 
+## Selector de color y cuentagotas
+
+Implementado el 26/11/2026 en Kotlin/Compose, sin dependencias externas:
+
+- `color/ColorUtils.kt` ofrece parseo y formato HEX (incluyendo alfa) y conversiones RGB, HSL y HSV/HSB.
+- El selector ofrece modos rueda HSV, cuadro HSV y valores; entrada HEX/RGB/HSB, alfa, vista previa, copia y colores recientes. La rueda y los controles exponen semántica accesible y admiten interacción táctil y teclado.
+- `color/RecentColorsRepository.kt` persiste el último color y un historial reciente deduplicado y limitado con `SharedPreferences`; maneja datos JSON corruptos.
+- El alfa ARGB seleccionado se combina con la opacidad del pincel tanto en la vista previa como en el trazo confirmado.
+- El cuentagotas toma muestras del bitmap del lienzo respetando el viewport, zoom y desplazamiento; los píxeles transparentes se componen sobre blanco. Se puede cancelar con el botón o Atrás. Si se toca fuera del lienzo, avisa y mantiene el modo activo.
+- El `AndroidView` del lienzo está recortado a sus límites para que un lienzo ampliado no cubra el HUD.
+
+Alcance pendiente: el cuentagotas solo muestrea el lienzo (no imágenes ni la pantalla global) y todavía no hay paletas personalizadas guardadas. La interacción con S Pen/tableta no se ha validado manualmente.
+
 ## Pinceles
 
 - `Brush.kt`: datos mínimos del pincel.
@@ -168,8 +181,10 @@ Antes de implementar una función que afecte la arquitectura (capas, zoom, anima
 - [x] Tamaños de lienzo predefinidos y personalizados hasta 4096 × 4096
 
 ### Bloque 2: muy valiosas (estilo Ibis Paint)
-- [ ] Selector de color completo (rueda o cuadro HSV, colores recientes y paleta guardada)
-- [ ] Cuentagotas (tocar el lienzo para tomar un color)
+- [x] Selector HSV con rueda y cuadro, entradas HEX/RGB/HSB, alfa y colores recientes persistentes
+- [x] Cuentagotas del lienzo
+- [ ] Paletas personalizadas guardadas
+- [ ] Cuentagotas desde imágenes
 - [ ] Estabilizador de trazo (suaviza el pulso)
 - [ ] Balde de relleno (con tolerancia; cuidar el rendimiento)
 - [ ] Formas y líneas rectas (línea, círculo, rectángulo)
@@ -245,12 +260,18 @@ Los archivos de la app están en `CStudio/app/src/main/java/com/example/cstudio/
 - `drawing/Viewport.kt`: matriz, zoom, desplazamiento, ajuste y conversión de coordenadas.
 - `drawing/StrokeRenderer.kt`: presión, borrador, opacidad y curvas Bézier.
 - `drawing/History.kt`: historial de deshacer/rehacer, limitado por pasos y memoria.
+- `color/ColorUtils.kt`: parseo y conversiones de colores RGB, HSL, HSV y alfa.
+- `color/RecentColorsRepository.kt`: último color e historial reciente persistidos.
 - `storage/ProjectMetadata.kt`: modelo y serialización JSON versionada.
 - `storage/ProjectStorage.kt`: creación, guardado atómico, carga, listado, miniaturas y borrado de proyectos.
 - `storage/AutoSaveDebouncer.kt`: espera dos segundos desde el último cambio antes de guardar.
 - `storage/ImageExporter.kt`: exporta PNG, JPG, WEBP y PDF mediante MediaStore; PDF usa `PdfDocument`.
 - `ui/ToolBar.kt`: organiza las filas de controles.
 - `ui/ColorPalette.kt`: paleta rápida de colores.
+- `ui/ColorPickerDialog.kt`: diálogo principal del selector de color.
+- `ui/ColorValueInputs.kt`: campos HEX, RGB y HSB.
+- `ui/ColorWheel.kt` y `ui/ColorSquare.kt`: selección interactiva HSV.
+- `ui/ColorSliders.kt` y `ui/RecentColorsRow.kt`: controles de tono/brillo/alfa e historial reciente.
 - `ui/BrushOptions.kt`: controles de tamaño y opacidad.
 - `ui/ActionButtons.kt`: selección de pincel y acciones del lienzo.
 - `ui/HomeScreen.kt`: pantalla inicial y galería con abrir, renombrar y borrar con confirmación.
@@ -279,6 +300,8 @@ Los archivos de la app están en `CStudio/app/src/main/java/com/example/cstudio/
 La suite está en:
 
 - `app/src/androidTest/java/com/example/cstudio/ExampleInstrumentedTest.kt`
+- `app/src/androidTest/java/com/example/cstudio/ColorPickerInputTest.kt`
+- `app/src/test/java/com/example/cstudio/color/ColorUtilsTest.kt`
 - `app/src/androidTest/java/com/example/cstudio/HomeScreenInstrumentedTest.kt`
 
 `ExampleInstrumentedTest.kt` cubre:
@@ -308,9 +331,9 @@ La suite está en:
 
 Resultado validado el 26/11/2026:
 
-- `.\gradlew assembleDebug`: exitoso.
-- `.\gradlew connectedDebugAndroidTest`: exitoso en Moto G85.
-- Suite conectada: 21 pruebas, todas aprobadas.
+- `.\gradlew testDebugUnitTest connectedDebugAndroidTest`: exitoso; 9 pruebas unitarias y 35 instrumentadas aprobadas en Moto G85.
+- `.\gradlew assembleRelease`: exitoso, incluyendo R8 y `lintVital`.
+- APK release generado sin firmar: `CStudio/app/build/outputs/apk/release/app-release-unsigned.apk`.
 
 Este dispositivo no tiene lápiz. La presión real y el rechazo de palma todavía no pueden considerarse validados.
 

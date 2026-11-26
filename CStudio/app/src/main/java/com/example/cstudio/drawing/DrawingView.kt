@@ -87,6 +87,12 @@ class DrawingView @JvmOverloads constructor(
     private var history = History(layerBitmap)
 
     var onMemoryError: (() -> Unit)? = null
+    var onEyedropperResult: ((Int?) -> Unit)? = null
+    var eyedropperEnabled = false
+        set(value) {
+            field = value
+            if (value) cancelStroke()
+        }
     var inputEnabled = true
         set(value) {
             field = value
@@ -118,6 +124,7 @@ class DrawingView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), backgroundPaint)
         canvas.save()
+        canvas.clipRect(0f, 0f, width.toFloat(), height.toFloat())
         canvas.concat(viewport.matrix)
         canvas.clipRect(0f, 0f, currentCanvasWidth.toFloat(), currentCanvasHeight.toFloat())
         canvas.drawRect(0f, 0f, currentCanvasWidth.toFloat(), currentCanvasHeight.toFloat(), paperPaint)
@@ -144,7 +151,13 @@ class DrawingView @JvmOverloads constructor(
         } else {
             canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
             strokeRenderer.drawBrushStroke(
-                canvas, strokeOpacity, pointsX, pointsY, pointsW, pointCount, strokeBounds()
+                canvas,
+                combinedStrokeOpacity(),
+                pointsX,
+                pointsY,
+                pointsW,
+                pointCount,
+                strokeBounds()
             )
         }
         canvas.restore()
@@ -163,6 +176,16 @@ class DrawingView @JvmOverloads constructor(
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                if (eyedropperEnabled) {
+                    val sampledColor = sampleColorAtViewPoint(event.x, event.y)
+                    if (sampledColor == null) {
+                        onEyedropperResult?.invoke(null)
+                    } else {
+                        eyedropperEnabled = false
+                        onEyedropperResult?.invoke(sampledColor)
+                    }
+                    return true
+                }
                 activeStylus = isStylus
                 isTransforming = false
                 activePointerId = MotionEvent.INVALID_POINTER_ID
@@ -470,7 +493,13 @@ class DrawingView @JvmOverloads constructor(
                     strokeRenderer.replayStroke(layerCanvas, pointsX, pointsY, pointsW, pointCount)
                 } else {
                     strokeRenderer.drawBrushStroke(
-                        layerCanvas, strokeOpacity, pointsX, pointsY, pointsW, pointCount, bounds
+                        layerCanvas,
+                        combinedStrokeOpacity(),
+                        pointsX,
+                        pointsY,
+                        pointsW,
+                        pointCount,
+                        bounds
                     )
                 }
                 history.commit(bounds, checkNotNull(before))
@@ -484,6 +513,28 @@ class DrawingView @JvmOverloads constructor(
         }
         pointCount = 0
         invalidate()
+    }
+
+    private fun combinedStrokeOpacity(): Float =
+        strokeOpacity * (Color.alpha(strokeColor) / 255f)
+
+    private fun sampleColorAtViewPoint(x: Float, y: Float): Int? {
+        val point = viewport.mapToCanvas(x, y)
+        if (!viewport.isInsideCanvas(point[0], point[1])) return null
+
+        val pixel = layerBitmap.getPixel(point[0].toInt(), point[1].toInt())
+        val alpha = Color.alpha(pixel)
+        if (alpha == 255) return pixel
+
+        val inverseAlpha = 255 - alpha
+        fun composite(channel: Int): Int =
+            (channel * alpha + 255 * inverseAlpha + 127) / 255
+
+        return Color.rgb(
+            composite(Color.red(pixel)),
+            composite(Color.green(pixel)),
+            composite(Color.blue(pixel))
+        )
     }
 
     private fun strokeBounds(): Rect {

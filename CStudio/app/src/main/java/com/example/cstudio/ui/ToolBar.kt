@@ -21,7 +21,9 @@ fun ToolBar(
     onRedo: () -> Unit,
     onResetViewport: () -> Unit,
     onExport: () -> Unit,
-    onHome: () -> Unit
+    onHome: () -> Unit,
+    onColorSelectionFinished: (Int) -> Unit,
+    onOpenColorPicker: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
         ColorPalette(
@@ -31,7 +33,9 @@ fun ToolBar(
                 onSettingsChange(
                     settings.copy(color = color.toArgb(), brush = Brushes.PENCIL)
                 )
-            }
+                onColorSelectionFinished(color.toArgb())
+            },
+            onOpenColorPicker = onOpenColorPicker
         )
         ActionButtons(
             selectedBrush = settings.brush,

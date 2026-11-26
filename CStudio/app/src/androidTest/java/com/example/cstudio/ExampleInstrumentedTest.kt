@@ -126,6 +126,69 @@ class ExampleInstrumentedTest {
     }
 
     @Test
+    fun stylusUsesItsPointerWhenPalmTouchesFirstAndCommitsOnStylusUp() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        lateinit var view: DrawingView
+        instrumentation.runOnMainSync {
+            view = DrawingView(instrumentation.targetContext)
+            view.layout(0, 0, 500, 500)
+            val downTime = SystemClock.uptimeMillis()
+
+            dispatchTouch(
+                view, downTime, downTime, MotionEvent.ACTION_DOWN,
+                floatArrayOf(90f), floatArrayOf(200f)
+            )
+            dispatchTouch(
+                view, downTime, downTime + 10,
+                MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                floatArrayOf(90f, 320f), floatArrayOf(200f, 200f),
+                intArrayOf(MotionEvent.TOOL_TYPE_FINGER, MotionEvent.TOOL_TYPE_STYLUS),
+                intArrayOf(3, 7)
+            )
+            dispatchTouch(
+                view, downTime, downTime + 20, MotionEvent.ACTION_MOVE,
+                floatArrayOf(120f, 340f), floatArrayOf(210f, 205f),
+                intArrayOf(MotionEvent.TOOL_TYPE_FINGER, MotionEvent.TOOL_TYPE_STYLUS),
+                intArrayOf(3, 7)
+            )
+            dispatchTouch(
+                view, downTime, downTime + 30, MotionEvent.ACTION_MOVE,
+                floatArrayOf(170f, 360f), floatArrayOf(220f, 210f),
+                intArrayOf(MotionEvent.TOOL_TYPE_FINGER, MotionEvent.TOOL_TYPE_STYLUS),
+                intArrayOf(3, 7)
+            )
+            dispatchTouch(
+                view, downTime, downTime + 40,
+                MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                floatArrayOf(170f, 360f), floatArrayOf(220f, 210f),
+                intArrayOf(MotionEvent.TOOL_TYPE_FINGER, MotionEvent.TOOL_TYPE_STYLUS),
+                intArrayOf(3, 7)
+            )
+            dispatchTouch(
+                view, downTime, downTime + 50, MotionEvent.ACTION_UP,
+                floatArrayOf(170f), floatArrayOf(220f),
+                intArrayOf(MotionEvent.TOOL_TYPE_FINGER), intArrayOf(3)
+            )
+        }
+
+        val drawn = view.snapshotLayer()
+        try {
+            assertTrue(hasOpaquePixel(drawn, 1_100, 1_500, 250, 500))
+            assertFalse(hasOpaquePixel(drawn, 250, 750, 250, 500))
+        } finally {
+            drawn.recycle()
+        }
+
+        instrumentation.runOnMainSync { view.undo() }
+        val undone = view.snapshotLayer()
+        try {
+            assertFalse(hasOpaquePixel(undone, 0, undone.width, 0, undone.height))
+        } finally {
+            undone.recycle()
+        }
+    }
+
+    @Test
     fun undoRedoAndClearKeepTheirBehavior() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         lateinit var view: DrawingView
@@ -605,10 +668,28 @@ class ExampleInstrumentedTest {
         x: FloatArray,
         y: FloatArray
     ) {
+        dispatchTouch(
+            view, downTime, eventTime, action, x, y,
+            IntArray(x.size) { MotionEvent.TOOL_TYPE_FINGER },
+            IntArray(x.size) { it }
+        )
+    }
+
+    private fun dispatchTouch(
+        view: DrawingView,
+        downTime: Long,
+        eventTime: Long,
+        action: Int,
+        x: FloatArray,
+        y: FloatArray,
+        toolTypes: IntArray,
+        ids: IntArray
+    ) {
+        require(x.size == y.size && x.size == toolTypes.size && x.size == ids.size)
         val properties = Array(x.size) { index ->
             MotionEvent.PointerProperties().apply {
-                id = index
-                toolType = MotionEvent.TOOL_TYPE_FINGER
+                id = ids[index]
+                toolType = toolTypes[index]
             }
         }
         val coords = Array(x.size) { index ->
@@ -625,5 +706,14 @@ class ExampleInstrumentedTest {
         )
         view.dispatchTouchEvent(event)
         event.recycle()
+    }
+
+    private fun hasOpaquePixel(bitmap: Bitmap, left: Int, right: Int, top: Int, bottom: Int): Boolean {
+        for (x in left.coerceAtLeast(0) until right.coerceAtMost(bitmap.width)) {
+            for (y in top.coerceAtLeast(0) until bottom.coerceAtMost(bitmap.height)) {
+                if (Color.alpha(bitmap.getPixel(x, y)) > 0) return true
+            }
+        }
+        return false
     }
 }

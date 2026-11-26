@@ -95,6 +95,7 @@ class DrawingView @JvmOverloads constructor(
 
     private var viewportInitialized = false
     private var activeStylus = false
+    private var activePointerId = MotionEvent.INVALID_POINTER_ID
     private val strokeBoundsRect = Rect()
 
     val canvasWidth: Int
@@ -164,13 +165,14 @@ class DrawingView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 activeStylus = isStylus
                 isTransforming = false
-                if (!isStylus && activeStylus) return true
+                activePointerId = MotionEvent.INVALID_POINTER_ID
                 val point = viewport.mapToCanvas(event.x, event.y)
                 if (!viewport.isInsideCanvas(point[0], point[1])) {
                     isDrawing = false
                     pointCount = 0
                     return true
                 }
+                activePointerId = event.getPointerId(0)
                 startStroke(
                     point[0],
                     point[1],
@@ -188,38 +190,65 @@ class DrawingView @JvmOverloads constructor(
                     return true
                 }
                 if (!isDrawing) return true
+                val pointerIndex = event.findPointerIndex(activePointerId)
+                if (pointerIndex < 0) return true
+                val pointerIsStylus =
+                    event.getToolType(pointerIndex) == MotionEvent.TOOL_TYPE_STYLUS
                 // Android agrupa varios puntos en un solo evento: los "históricos"
                 // son los intermedios. Si se ignoran, las líneas salen quebradas.
                 for (i in 0 until event.historySize) {
                     val point = viewport.mapToCanvas(
-                        event.getHistoricalX(i),
-                        event.getHistoricalY(i)
+                        event.getHistoricalX(pointerIndex, i),
+                        event.getHistoricalY(pointerIndex, i)
                     )
                     addPoint(
                         point[0],
                         point[1],
-                        widthFor(event.getHistoricalPressure(i), isStylus, strokeBrush, strokeSizeDp)
+                        widthFor(
+                            event.getHistoricalPressure(pointerIndex, i),
+                            pointerIsStylus,
+                            strokeBrush,
+                            strokeSizeDp
+                        )
                     )
                 }
-                val point = viewport.mapToCanvas(event.x, event.y)
+                val point = viewport.mapToCanvas(event.getX(pointerIndex), event.getY(pointerIndex))
                 addPoint(
                     point[0],
                     point[1],
-                    widthFor(event.pressure, isStylus, strokeBrush, strokeSizeDp)
+                    widthFor(
+                        event.getPressure(pointerIndex),
+                        pointerIsStylus,
+                        strokeBrush,
+                        strokeSizeDp
+                    )
                 )
                 invalidate()
             }
 
             MotionEvent.ACTION_UP -> {
                 if (isDrawing) {
-                    val point = viewport.mapToCanvas(event.x, event.y)
+                    val pointerIndex = event.findPointerIndex(activePointerId)
+                        .takeIf { it >= 0 } ?: 0
+                    val pointerIsStylus =
+                        event.getToolType(pointerIndex) == MotionEvent.TOOL_TYPE_STYLUS
+                    val point = viewport.mapToCanvas(
+                        event.getX(pointerIndex),
+                        event.getY(pointerIndex)
+                    )
                     addPoint(
                         point[0],
                         point[1],
-                        widthFor(event.pressure, isStylus, strokeBrush, strokeSizeDp)
+                        widthFor(
+                            event.getPressure(pointerIndex),
+                            pointerIsStylus,
+                            strokeBrush,
+                            strokeSizeDp
+                        )
                     )
                     finishStroke()
                 }
+                activeStylus = false
                 isTransforming = false
             }
 
@@ -230,6 +259,7 @@ class DrawingView @JvmOverloads constructor(
                         if (strokeStartedWithFinger || isTransforming) cancelStroke()
                         val point = viewport.mapToCanvas(event.getX(actionIndex), event.getY(actionIndex))
                         if (viewport.isInsideCanvas(point[0], point[1])) {
+                            activePointerId = event.getPointerId(actionIndex)
                             startStroke(point[0], point[1], event.getPressure(actionIndex),
                                 true, false)
                             invalidate()
@@ -244,6 +274,24 @@ class DrawingView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_POINTER_UP -> {
+                if (event.getPointerId(actionIndex) == activePointerId && isDrawing) {
+                    val pointerIsStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS
+                    val point = viewport.mapToCanvas(
+                        event.getX(actionIndex),
+                        event.getY(actionIndex)
+                    )
+                    addPoint(
+                        point[0],
+                        point[1],
+                        widthFor(
+                            event.getPressure(actionIndex),
+                            pointerIsStylus,
+                            strokeBrush,
+                            strokeSizeDp
+                        )
+                    )
+                    finishStroke()
+                }
                 if (actionToolType == MotionEvent.TOOL_TYPE_STYLUS) activeStylus = false
                 isTransforming = false
             }
@@ -410,6 +458,7 @@ class DrawingView @JvmOverloads constructor(
     private fun finishStroke() {
         if (!isDrawing) return
         isDrawing = false
+        activePointerId = MotionEvent.INVALID_POINTER_ID
         if (pointCount > 0) {
             val bounds = strokeBounds()
             var before: Bitmap? = null
@@ -449,6 +498,7 @@ class DrawingView @JvmOverloads constructor(
     private fun cancelStroke() {
         isDrawing = false
         pointCount = 0
+        activePointerId = MotionEvent.INVALID_POINTER_ID
         invalidate()
     }
 }

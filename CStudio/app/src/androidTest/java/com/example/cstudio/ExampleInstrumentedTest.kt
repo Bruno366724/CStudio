@@ -23,6 +23,7 @@ import com.example.cstudio.storage.ProjectMetadata
 import com.example.cstudio.storage.ProjectStorage
 import com.example.cstudio.storage.UnsupportedProjectVersionException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -484,6 +485,45 @@ class ExampleInstrumentedTest {
         assertEquals(0, saves)
         delay(200L)
         assertEquals(1, saves)
+        debouncer.cancelAndJoin()
+    }
+
+    @Test
+    fun autosaveSchedulesOneMoreRunWhenChangedDuringSave() = runBlocking {
+        val saveStarted = CompletableDeferred<Unit>()
+        val finishFirstSave = CompletableDeferred<Unit>()
+        var saves = 0
+        var firstSaveCompleted = false
+        val debouncer = AutoSaveDebouncer(this, 10L) {
+            saves++
+            if (saves == 1) {
+                saveStarted.complete(Unit)
+                finishFirstSave.await()
+                firstSaveCompleted = true
+            }
+        }
+
+        debouncer.schedule()
+        saveStarted.await()
+        debouncer.schedule()
+        finishFirstSave.complete(Unit)
+        delay(100L)
+
+        assertTrue(firstSaveCompleted)
+        assertEquals(2, saves)
+        debouncer.cancelAndJoin()
+    }
+
+    @Test
+    fun cancellingAutosaveDuringDebouncePreventsSave() = runBlocking {
+        var saves = 0
+        val debouncer = AutoSaveDebouncer(this, 100L) { saves++ }
+        debouncer.schedule()
+        delay(20L)
+        debouncer.cancel()
+        delay(150L)
+
+        assertEquals(0, saves)
         debouncer.cancelAndJoin()
     }
 

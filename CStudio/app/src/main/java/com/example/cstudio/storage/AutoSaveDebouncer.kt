@@ -4,6 +4,7 @@ package com.example.cstudio.storage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -13,22 +14,44 @@ internal class AutoSaveDebouncer(
     private val action: suspend () -> Unit
 ) {
     private var pendingJob: Job? = null
+    private var runningJob: Job? = null
+    private var rerun = false
 
     fun schedule() {
+        if (runningJob?.isActive == true) {
+            rerun = true
+            return
+        }
         pendingJob?.cancel()
         pendingJob = scope.launch {
             delay(delayMillis)
-            action()
+            pendingJob = null
+            runningJob = currentCoroutineContext()[Job]
+            try {
+                action()
+            } finally {
+                runningJob = null
+                if (rerun) {
+                    rerun = false
+                    schedule()
+                }
+            }
         }
     }
 
     fun cancel() {
-        pendingJob?.cancel()
-        pendingJob = null
+        rerun = false
+        if (runningJob == null) {
+            pendingJob?.cancel()
+            pendingJob = null
+        }
     }
 
     suspend fun cancelAndJoin() {
-        pendingJob?.cancelAndJoin()
+        rerun = false
+        val waitingJob = pendingJob
         pendingJob = null
+        waitingJob?.cancelAndJoin()
+        runningJob?.join()
     }
 }

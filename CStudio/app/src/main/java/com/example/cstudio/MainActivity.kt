@@ -44,6 +44,7 @@ import com.example.cstudio.ui.NewProjectDialog
 import com.example.cstudio.ui.ToolBar
 import com.example.cstudio.ui.theme.CStudioTheme
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
@@ -72,6 +73,7 @@ class MainActivity : ComponentActivity() {
     private var pendingExportOptions: ExportOptions? = null
     private var isBusy = false
     private var dirty = false
+    private var changeVersion = 0L
     private val projectSaveMutex = PROCESS_PROJECT_MUTEX
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,6 +96,7 @@ class MainActivity : ComponentActivity() {
         }
         drawingView.onStrokeCommitted = {
             if (projectReady) {
+                changeVersion++
                 dirty = true
                 autoSaveDebouncer.schedule()
             }
@@ -213,6 +216,7 @@ class MainActivity : ComponentActivity() {
             autoSaveDebouncer.cancel()
             val metadata = currentProject
             if (metadata != null) {
+                val saveVersion = changeVersion
                 val snapshot = try {
                     drawingView.snapshotLayer()
                 } catch (error: OutOfMemoryError) {
@@ -233,8 +237,10 @@ class MainActivity : ComponentActivity() {
                             }
                             if (currentProject?.id == updatedMetadata.id) {
                                 currentProject = updatedMetadata
-                                dirty = false
+                                dirty = changeVersion != saveVersion
                             }
+                        } catch (exception: CancellationException) {
+                            throw exception
                         } catch (exception: IOException) {
                             dirty = true
                             Log.e(TAG, "No se pudo guardar el proyecto al pausar.", exception)
@@ -329,6 +335,8 @@ class MainActivity : ComponentActivity() {
                 displayProject(project)
             } catch (exception: IOException) {
                 showStorageError("No se pudo crear el proyecto.", exception)
+            } catch (exception: CancellationException) {
+                throw exception
             } catch (exception: Exception) {
                 Log.e(TAG, "Error inesperado al crear el proyecto.", exception)
                 showStorageError("No se pudo crear el proyecto.", IOException(exception.message, exception))
@@ -354,6 +362,8 @@ class MainActivity : ComponentActivity() {
                 displayProject(project)
             } catch (exception: IOException) {
                 showStorageError("No se pudo abrir el proyecto.", exception)
+            } catch (exception: CancellationException) {
+                throw exception
             } catch (exception: Exception) {
                 Log.e(TAG, "Error inesperado al abrir el proyecto.", exception)
                 showStorageError("No se pudo abrir el proyecto.", IOException(exception.message, exception))
@@ -377,6 +387,8 @@ class MainActivity : ComponentActivity() {
                 refreshHome()
             } catch (exception: IOException) {
                 showStorageError("No se pudo renombrar el proyecto.", exception)
+            } catch (exception: CancellationException) {
+                throw exception
             } catch (exception: Exception) {
                 Log.e(TAG, "Error inesperado al renombrar.", exception)
                 showStorageError("No se pudo renombrar el proyecto.", IOException(exception.message, exception))
@@ -397,6 +409,8 @@ class MainActivity : ComponentActivity() {
                 refreshHome()
             } catch (exception: IOException) {
                 showStorageError("No se pudo borrar el proyecto.", exception)
+            } catch (exception: CancellationException) {
+                throw exception
             } catch (exception: Exception) {
                 Log.e(TAG, "Error inesperado al borrar.", exception)
                 showStorageError("No se pudo borrar el proyecto.", IOException(exception.message, exception))
@@ -465,23 +479,39 @@ class MainActivity : ComponentActivity() {
             showMemoryError()
             return false
         }
+        val saveVersion = changeVersion
+        var writeCompleted = false
+        var completedMetadata: ProjectMetadata? = null
         try {
-            val updatedMetadata = withContext(Dispatchers.IO) {
+            val updatedMetadata = withContext(NonCancellable + Dispatchers.IO) {
                 try {
                     projectSaveMutex.withLock {
                         projectStorage.saveProject(metadata, listOf(snapshot))
+                    }.also {
+                        completedMetadata = it
+                        writeCompleted = true
                     }
                 } finally {
                     snapshot.recycle()
                 }
             }
             if (currentProject?.id == updatedMetadata.id) currentProject = updatedMetadata
-            dirty = false
+            dirty = changeVersion != saveVersion
             return true
         } catch (exception: IOException) {
             dirty = true
             showStorageError("No se pudo guardar el proyecto.", exception)
             return false
+        } catch (exception: CancellationException) {
+            if (writeCompleted) {
+                completedMetadata?.let {
+                    if (currentProject?.id == it.id) currentProject = it
+                }
+                dirty = changeVersion != saveVersion
+            } else {
+                dirty = true
+            }
+            throw exception
         } catch (exception: Exception) {
             dirty = true
             Log.e(TAG, "Error inesperado al guardar.", exception)
@@ -522,6 +552,8 @@ class MainActivity : ComponentActivity() {
                 ).show()
             } catch (exception: IOException) {
                 showStorageError("No se pudo guardar el archivo.", exception)
+            } catch (exception: CancellationException) {
+                throw exception
             } catch (exception: Exception) {
                 Log.e(TAG, "Error inesperado al exportar.", exception)
                 showStorageError("No se pudo guardar el archivo.", IOException(exception.message, exception))

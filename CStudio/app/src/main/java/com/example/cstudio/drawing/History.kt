@@ -46,7 +46,7 @@ internal class History(private val bitmap: Bitmap) {
     }
 
     fun commit(bounds: Rect, before: Bitmap) {
-        pushUndo(HistoryEntry(bounds, before, null))
+        pushUndo(HistoryEntry(Rect(bounds), before, null))
     }
 
     fun clear() {

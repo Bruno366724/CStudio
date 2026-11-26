@@ -17,6 +17,7 @@ import com.example.cstudio.brush.Brushes
 import com.example.cstudio.color.RecentColorsRepository
 import com.example.cstudio.drawing.DrawingView
 import com.example.cstudio.drawing.History
+import com.example.cstudio.drawing.Viewport
 import com.example.cstudio.storage.AutoSaveDebouncer
 import com.example.cstudio.storage.ExportBackground
 import com.example.cstudio.storage.ExportFormat
@@ -43,6 +44,23 @@ import java.util.UUID
  */
 @RunWith(AndroidJUnit4::class)
 class ExampleInstrumentedTest {
+    @Test
+    fun viewportResizeKeepsCanvasPointAtViewCenter() {
+        val viewport = Viewport(1920, 1080)
+        viewport.reset(500, 500)
+        val originalCenter = viewport.mapToCanvas(250f, 250f).copyOf()
+
+        viewport.resize(500, 500, 500, 450)
+        val resizedCenter = viewport.mapToCanvas(250f, 225f).copyOf()
+        assertEquals(originalCenter[0], resizedCenter[0], 0.01f)
+        assertEquals(originalCenter[1], resizedCenter[1], 0.01f)
+
+        viewport.resize(500, 450, 500, 500)
+        val restoredCenter = viewport.mapToCanvas(250f, 250f)
+        assertEquals(originalCenter[0], restoredCenter[0], 0.01f)
+        assertEquals(originalCenter[1], restoredCenter[1], 0.01f)
+    }
+
     @Test
     fun useAppContext() {
         // Context of the app under test.
@@ -581,6 +599,38 @@ class ExampleInstrumentedTest {
             history.reset()
             assertEquals(0L, history.trackedBytes)
             assertHistoryBytesAreConsistent(history)
+        } finally {
+            history.reset()
+            bitmap.recycle()
+        }
+    }
+
+    @Test
+    fun historyCopiesBoundsWhenCallerReusesRectAcrossStrokes() {
+        val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        val history = History(bitmap)
+        val bounds = android.graphics.Rect(2, 3, 10, 11)
+        try {
+            val firstBefore = history.capture(bounds)
+            bitmap.setPixel(4, 5, Color.RED)
+            history.commit(bounds, firstBefore)
+
+            bounds.set(20, 21, 28, 29)
+            val secondBefore = history.capture(bounds)
+            bitmap.setPixel(22, 23, Color.BLUE)
+            history.commit(bounds, secondBefore)
+
+            assertTrue(history.undo())
+            assertEquals(Color.RED, bitmap.getPixel(4, 5))
+            assertEquals(Color.TRANSPARENT, bitmap.getPixel(22, 23))
+
+            assertTrue(history.undo())
+            assertEquals(Color.TRANSPARENT, bitmap.getPixel(4, 5))
+            assertTrue(history.redo())
+            assertEquals(Color.RED, bitmap.getPixel(4, 5))
+            assertEquals(Color.TRANSPARENT, bitmap.getPixel(22, 23))
+            assertTrue(history.redo())
+            assertEquals(Color.BLUE, bitmap.getPixel(22, 23))
         } finally {
             history.reset()
             bitmap.recycle()

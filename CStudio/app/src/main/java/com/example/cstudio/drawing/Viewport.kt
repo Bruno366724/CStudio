@@ -38,15 +38,23 @@ internal class Viewport(
 
     fun resize(oldWidth: Int, oldHeight: Int, width: Int, height: Int) {
         if (oldWidth <= 0 || oldHeight <= 0 || width <= 0 || height <= 0) return
+        val centerX = mapToCanvas(oldWidth / 2f, oldHeight / 2f)[0]
+        val centerY = mappedPoint[1]
+        val previousFitScale = fitScale
+        if (previousFitScale <= 0f) return
+
+        matrix.getValues(matrixValues)
+        val zoom = matrixValues[Matrix.MSCALE_X] / previousFitScale
+        fitScale = min(width.toFloat() / canvasWidth, height.toFloat() / canvasHeight)
+        val scale = fitScale * zoom
         viewWidth = width
         viewHeight = height
-        val scaleX = width.toFloat() / oldWidth
-        val scaleY = height.toFloat() / oldHeight
-        val scale = min(scaleX, scaleY)
-        matrix.postScale(scale, scale, width / 2f, height / 2f)
-        matrix.postTranslate(
-            (width - oldWidth * scale) / 2f,
-            (height - oldHeight * scale) / 2f
+        matrix.setValues(
+            floatArrayOf(
+                scale, 0f, width / 2f - centerX * scale,
+                0f, scale, height / 2f - centerY * scale,
+                0f, 0f, 1f
+            )
         )
         limitPan(width, height)
         updateInverse()

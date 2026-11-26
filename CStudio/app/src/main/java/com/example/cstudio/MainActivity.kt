@@ -15,6 +15,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -201,30 +202,6 @@ class MainActivity : ComponentActivity() {
                         )
                     } else {
                         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-                            if (eyedropperMode) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(MaterialTheme.colorScheme.secondaryContainer)
-                                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        "Toca el lienzo para tomar un color.",
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    TextButton(
-                                        onClick = {
-                                            eyedropperMode = false
-                                            drawingView.eyedropperEnabled = false
-                                        }
-                                    ) {
-                                        Text("Cancelar")
-                                    }
-                                }
-                            }
                             ToolBar(
                                 settings = brushSettings,
                                 onSettingsChange = { brushSettings = it },
@@ -241,11 +218,38 @@ class MainActivity : ComponentActivity() {
                                 onColorSelectionFinished = onColorSelectionFinished,
                                 onOpenColorPicker = { colorPickerDialogVisible = true }
                             )
-                            AndroidView(
-                                modifier = Modifier.fillMaxWidth().weight(1f).clipToBounds(),
-                                factory = { drawingView },
-                                update = { view -> view.brushSettings = brushSettings }
-                            )
+                            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                                AndroidView(
+                                    modifier = Modifier.fillMaxSize().clipToBounds(),
+                                    factory = { drawingView },
+                                    update = { view -> view.brushSettings = brushSettings }
+                                )
+                                if (eyedropperMode) {
+                                    Row(
+                                        modifier = Modifier
+                                            .align(Alignment.TopCenter)
+                                            .fillMaxWidth()
+                                            .background(MaterialTheme.colorScheme.secondaryContainer)
+                                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            "Toca el lienzo para tomar un color.",
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        TextButton(
+                                            onClick = {
+                                                eyedropperMode = false
+                                                drawingView.eyedropperEnabled = false
+                                            }
+                                        ) {
+                                            Text("Cancelar")
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     if (newProjectDialogVisible) {

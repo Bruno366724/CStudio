@@ -96,7 +96,7 @@ El contenido dibujado vive en un `Bitmap` ARGB_8888 mutable administrado por `Dr
 - Ajusta la vista con `fitScale`.
 - Permite zoom mínimo de 0.5 × el ajuste y un máximo de al menos 800 %.
 - Limita el pan para mantener una parte visible del lienzo.
-- Conserva o adapta relativamente zoom/pan al cambiar el tamaño de la vista.
+- Al cambiar el tamaño de la vista, conserva el punto del lienzo situado en el centro y recalcula `fitScale`.
 
 ## Selector de color y cuentagotas
 
@@ -107,6 +107,7 @@ Implementados y probados el 26/11/2026 en Kotlin/Compose, sin dependencias exter
 - `color/RecentColorsRepository.kt` persiste el último color y un historial reciente deduplicado y limitado con `SharedPreferences`; maneja datos JSON corruptos.
 - El alfa ARGB seleccionado se combina con la opacidad del pincel tanto en la vista previa como en el trazo confirmado.
 - El cuentagotas toma muestras del bitmap del lienzo respetando el viewport, zoom y desplazamiento; los píxeles transparentes se componen sobre blanco. Se puede cancelar con el botón o Atrás. Si se toca fuera del lienzo, avisa y mantiene el modo activo.
+- El aviso y botón de cancelar del cuentagotas se dibujan como superposición; no reducen el área del `AndroidView` ni deben mover el lienzo.
 - El `AndroidView` del lienzo está recortado a sus límites para que un lienzo ampliado no cubra el HUD.
 
 Alcance pendiente de estas funciones: no se pueden guardar paletas personalizadas ni tomar muestras desde imágenes o desde otras apps. El selector HSV y el cuentagotas del lienzo sí están implementados; la interacción con S Pen/tableta todavía no se ha validado manualmente.
@@ -130,6 +131,7 @@ Alcance pendiente de estas funciones: no se pueden guardar paletas personalizada
 - Al rehacer se restaura `after`.
 - Si falta memoria al capturar el estado posterior, se informa `onMemoryError` y se conserva la entrada sin perder el dibujo.
 - `clear()` crea una entrada especial que borra el lienzo completo.
+- `History.commit()` copia los límites del trazo. `DrawingView` reutiliza un `Rect`, por lo que guardar la referencia original hacía que trazos anteriores usaran los límites del último trazo al deshacer/rehacer.
 
 Una revisión futura debería volver a verificar los cálculos de `historyBytes` en `undo()` y el tratamiento de OOM, aunque las pruebas existentes pasan.
 
@@ -219,7 +221,9 @@ Antes de implementar una función que afecte la arquitectura (capas, zoom, anima
   - Cuidar `ACTION_CANCEL` por apoyo de la palma.
 - Suavizado de trazos con curvas Bézier cuadráticas entre puntos.
 - Deshacer/rehacer: máximo 20 pasos y 64 MB. Cada entrada guarda el estado anterior y captura el estado posterior al deshacer.
-- Zoom y pan con `Matrix`.
+- Zoom y pan con `Matrix`; al redimensionar, se conserva anclado el punto del lienzo que estaba bajo el centro de la vista.
+- El aviso del cuentagotas es una superposición sobre el lienzo para no cambiar su tamaño ni desplazar el viewport.
+- En `app/build.gradle.kts`, el alcance de optimización R8 de release se limita a `com.example.cstudio.**`. No incluir Kotlin/AndroidX en `packageScope`: hacerlo provocó un `IllegalAccessError` durante el arranque en release.
 - Guardado: almacenamiento interno de la app. Exportar PNG, JPG, WEBP y PDF con `MediaStore`.
 - Los proyectos viven en `filesDir/projects/<uuid>` con metadatos JSON versionados, capas PNG ARGB_8888 y miniaturas de 256×256. El autosave usa debounce de 2 segundos y también guarda al pausar la Activity.
 - El JSON y `ProjectStorage` conservan listas de capas extensibles; la interfaz/editor solo abre y edita una capa por proyecto. No asumir que las capas adicionales ya son visibles o editables desde la app.
@@ -257,7 +261,7 @@ Los archivos de la app están en `CStudio/app/src/main/java/com/example/cstudio/
 - `brush/Brushes.kt`: lista los pinceles disponibles (Pincel y Borrador).
 - `brush/BrushSettings.kt`: agrupa color, tamaño, opacidad y pincel seleccionado.
 - `drawing/DrawingView.kt`: vista Android del lienzo, entrada táctil y coordinación de componentes.
-- `drawing/Viewport.kt`: matriz, zoom, desplazamiento, ajuste y conversión de coordenadas.
+- `drawing/Viewport.kt`: matriz, zoom, desplazamiento, ajuste, conversión de coordenadas y anclaje al redimensionar.
 - `drawing/StrokeRenderer.kt`: presión, borrador, opacidad y curvas Bézier.
 - `drawing/History.kt`: historial de deshacer/rehacer, limitado por pasos y memoria.
 - `color/ColorUtils.kt`: parseo y conversiones de colores RGB, HSL, HSV y alfa.
@@ -330,11 +334,15 @@ La suite está en:
 
 Resultado validado el 26/11/2026:
 
-- `.\gradlew testDebugUnitTest connectedDebugAndroidTest`: exitoso; 9 pruebas unitarias y 35 instrumentadas aprobadas en Moto G85.
-- `.\gradlew assembleRelease`: exitoso, incluyendo R8 y `lintVital`.
+- `.\gradlew testDebugUnitTest`: 9 pruebas unitarias aprobadas.
+- `.\gradlew connectedDebugAndroidTest`: 35 pruebas instrumentadas aprobadas previamente en el Moto G85.
+- `.\gradlew :app:compileDebugAndroidTestKotlin` y `.\gradlew assembleRelease`: exitosos tras las correcciones recientes.
+- En el emulador API 37 pasaron 4 pruebas instrumentadas enfocadas: anclaje del viewport, límites reutilizados en historial, undo/redo y contabilización de memoria.
+- La ejecución completa actual del emulador API 37 corrió 37 pruebas; 7 pruebas UI fallaron al inicializar Espresso 3.5.1 por `NoSuchMethodException: InputManager.getInstance`. La suite completa debe repetirse con una versión de pruebas compatible con API 37; las 35 pruebas previas en Moto G85 habían pasado.
 - APK release generado sin firmar: `CStudio/app/build/outputs/apk/release/app-release-unsigned.apk`.
+- El usuario generó e instaló un APK release firmado con Android Studio y confirmó que abre y funciona correctamente. El archivo de firma y sus contraseñas se guardan fuera del repositorio.
 
-Este dispositivo no tiene lápiz. La presión real y el rechazo de palma todavía no pueden considerarse validados.
+El teléfono probado no tiene lápiz. La presión real y el rechazo de palma todavía no pueden considerarse validados en la Samsung con S Pen.
 
 ## Estado actual (actualizar a mano)
 
@@ -346,6 +354,7 @@ Hecho y probado en el celular:
 - [x] Barra de herramientas (colores, tamaño, opacidad, pincel/borrador, limpiar)
 - [x] Selector HSV con rueda/cuadro, campos HEX/RGB/HSB, alfa e historial reciente
 - [x] Cuentagotas del lienzo con zoom/pan, cancelación y aviso al tocar fuera
+- [x] El selector y el cuentagotas mantienen el lienzo en su posición al abrirse/activarse
 - [x] Deshacer/rehacer
 - [x] Zoom y desplazamiento con dos dedos; botón Ajustar
 - [x] Autoguardado, carga del último proyecto y recuperación con proyecto nuevo ante archivos dañados
@@ -362,17 +371,18 @@ Hecho y probado en el celular:
 - [x] Entrada bloqueada durante carga, guardado y navegación
 - [x] Guardado condicionado a cambios reales y recuperación de project.json
 - [x] Historial de memoria reducida con undo/redo exacto
-- [x] Límites básicos de zoom/pan y conservación relativa al redimensionar
+- [x] Historial conserva límites de cada trazo al hacer undo/redo
+- [x] Límites básicos de zoom/pan y anclaje del lienzo al redimensionar
+- [x] APK release firmado e instalado en el teléfono
 
 Pendiente de validar:
 - [ ] Presión real del S Pen y latencia en la tableta (el celular no tiene lápiz)
 - [ ] Rechazo de palma con la tableta Samsung real
-- [ ] Compilación release firmada y actualización instalada encima
 
 Las demás funciones están en la lista de arriba.
 
 **Problema actual / último error:**
-Sin errores conocidos en las pruebas conectadas ejecutadas en el Moto G85.
+El usuario confirma que el APK firmado funciona y que el selector/cuentagotas ya no desplazan el lienzo. En el emulador API 37, 7 pruebas UI siguen bloqueadas por incompatibilidad de Espresso 3.5.1 con `InputManager.getInstance`; no se observó un fallo funcional en las pruebas enfocadas.
 
 ## Limitaciones conocidas y trabajo que puede parecer hecho pero no está terminado
 
@@ -382,7 +392,7 @@ Sin errores conocidos en las pruebas conectadas ejecutadas en el Moto G85.
 - No hay acción configurable para el botón del S Pen ni editor de curva de presión; el rechazo de palma aún no se ha validado en la tableta Samsung.
 - No hay línea de tiempo ni animación.
 - No hay copia de seguridad/exportación masiva de proyectos.
-- El APK release firmado todavía no está preparado.
+- La suite completa de UI en API 37 requiere actualizar Espresso/AndroidX Test; la validación previa de 35 instrumentadas en Moto G85 pasó.
 - Falta prueba real de 4096 × 4096 y canvas.maximumBitmapWidth en Samsung.
 - Faltan pruebas específicas de exportación fallida y filas MediaStore huérfanas.
 - Faltan pruebas específicas de doble navegación, recorrido completo de Activity recreada y undo/redo con trazos grandes.

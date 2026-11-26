@@ -203,7 +203,7 @@ En cada frame de un trazo en curso, `StrokeRenderer.replayStroke` reconstruye y 
 - [x] Tarea 1: puntero activo del lápiz y pruebas de palma + lápiz
 - [x] Tarea 2: deshacer sin historial ya no muestra "Memoria insuficiente"
 - [x] Tarea 3: autoguardado sin falsos errores, `CancellationException` relanzada
-- [ ] Tarea 4: `historyBytes` consistente con el invariante
+- [x] Tarea 4: `historyBytes` consistente con el invariante
 - [ ] Tarea 5: `assembleRelease` compila y se reportó el resultado
 - [ ] `.\gradlew assembleDebug` exitoso
 - [ ] `.\gradlew connectedDebugAndroidTest` exitoso (todas las pruebas, incluidas las nuevas)

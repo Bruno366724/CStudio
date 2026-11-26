@@ -29,6 +29,12 @@ internal class History(private val bitmap: Bitmap) {
     private val redoStack = ArrayDeque<HistoryEntry>()
     private var historyBytes = 0L
 
+    internal val trackedBytes: Long
+        get() = historyBytes
+
+    internal val liveEntryBytesForTesting: Long
+        get() = (undoStack.asSequence() + redoStack.asSequence()).sumOf { it.byteSize }
+
     val canUndo: Boolean
         get() = undoStack.isNotEmpty()
 
@@ -51,19 +57,18 @@ internal class History(private val bitmap: Bitmap) {
     }
 
     fun undo(): Boolean {
-        val entry = undoStack.pollLast() ?: return false
-        entry.after?.recycle()
-        entry.after = null
-        historyBytes -= entry.byteSize
-        try {
-            val after = capture(entry.bounds)
+        val entry = undoStack.peekLast() ?: return false
+        if (entry.after == null) {
+            val after = try {
+                capture(entry.bounds)
+            } catch (error: OutOfMemoryError) {
+                return false
+            }
             entry.after = after
             historyBytes += after.byteCount.toLong()
-        } catch (error: OutOfMemoryError) {
-            undoStack.addLast(entry)
-            return false
         }
         restoreRegion(entry.bounds, entry.before)
+        undoStack.removeLast()
         redoStack.addLast(entry)
         return true
     }

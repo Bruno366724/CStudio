@@ -390,6 +390,47 @@ class ExampleInstrumentedTest {
     }
 
     @Test
+    fun historyByteAccountingStaysCorrectAcrossUndoRedoCyclesAndReset() {
+        val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        val history = History(bitmap)
+        val bounds = android.graphics.Rect(4, 5, 12, 13)
+        try {
+            bitmap.setPixel(6, 7, Color.RED)
+            val before = history.capture(bounds)
+            bitmap.setPixel(6, 7, Color.BLUE)
+            history.commit(bounds, before)
+            assertHistoryBytesAreConsistent(history)
+
+            assertTrue(history.undo())
+            assertEquals(Color.RED, bitmap.getPixel(6, 7))
+            assertHistoryBytesAreConsistent(history)
+
+            assertTrue(history.redo())
+            assertEquals(Color.BLUE, bitmap.getPixel(6, 7))
+            assertHistoryBytesAreConsistent(history)
+
+            assertTrue(history.undo())
+            assertEquals(Color.RED, bitmap.getPixel(6, 7))
+            assertHistoryBytesAreConsistent(history)
+
+            assertTrue(history.redo())
+            assertEquals(Color.BLUE, bitmap.getPixel(6, 7))
+            assertHistoryBytesAreConsistent(history)
+
+            history.reset()
+            assertEquals(0L, history.trackedBytes)
+            assertHistoryBytesAreConsistent(history)
+        } finally {
+            history.reset()
+            bitmap.recycle()
+        }
+    }
+
+    private fun assertHistoryBytesAreConsistent(history: History) {
+        assertEquals(history.liveEntryBytesForTesting, history.trackedBytes)
+    }
+
+    @Test
     fun replacingLayerClearsUndoHistory() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         lateinit var view: DrawingView

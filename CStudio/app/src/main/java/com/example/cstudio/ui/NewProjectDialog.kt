@@ -46,7 +46,9 @@ fun NewProjectDialog(
     var name by rememberSaveable { mutableStateOf("Sin título") }
     var widthText by rememberSaveable { mutableStateOf(CanvasDimensions.DEFAULT_WIDTH.toString()) }
     var heightText by rememberSaveable { mutableStateOf(CanvasDimensions.DEFAULT_HEIGHT.toString()) }
-    var selectedPreset by rememberSaveable { mutableStateOf<String?>("HD 1920 × 1080") }
+    val defaultPreset = presets.first { it.width == CanvasDimensions.DEFAULT_WIDTH &&
+        it.height == CanvasDimensions.DEFAULT_HEIGHT }
+    var selectedPreset by rememberSaveable { mutableStateOf<String?>(defaultPreset.label) }
 
     val width = widthText.toIntOrNull()
     val height = heightText.toIntOrNull()
@@ -158,6 +160,8 @@ private data class CanvasPreset(val label: String, val width: Int, val height: I
 
 private fun dimensionError(text: String, value: Int?): String? {
     if (text.isEmpty() || value == null) return "Ingresa una dimensión."
-    if (!CanvasDimensions.isValid(value, value)) return "Debe estar entre 64 y 4096 px."
+    if (value == null || !CanvasDimensions.isValidSide(value)) {
+        return "Debe estar entre 64 y 4096 px."
+    }
     return null
 }

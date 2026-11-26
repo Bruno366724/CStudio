@@ -70,6 +70,11 @@ class DrawingView @JvmOverloads constructor(
     private var pointsY = FloatArray(256)
     private var pointsW = FloatArray(256)
     private var pointCount = 0
+    private var strokeMinX = 0f
+    private var strokeMaxX = 0f
+    private var strokeMinY = 0f
+    private var strokeMaxY = 0f
+    private var strokeMaxWidth = 0f
 
     // Ajustes "congelados" al empezar el trazo
     private var strokeColor = Color.BLACK
@@ -82,6 +87,15 @@ class DrawingView @JvmOverloads constructor(
     private var history = History(layerBitmap)
 
     var onMemoryError: (() -> Unit)? = null
+    var inputEnabled = true
+        set(value) {
+            field = value
+            if (!value) cancelStroke()
+        }
+
+    private var viewportInitialized = false
+    private var activeStylus = false
+    private val strokeBoundsRect = Rect()
 
     val canvasWidth: Int
         get() = currentCanvasWidth
@@ -92,7 +106,12 @@ class DrawingView @JvmOverloads constructor(
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w <= 0 || h <= 0) return
-        resetViewport()
+        if (!viewportInitialized) {
+            resetViewport()
+            viewportInitialized = true
+        } else if (oldw != w || oldh != h) {
+            viewport.resize(oldw, oldh, w, h)
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -111,12 +130,16 @@ class DrawingView @JvmOverloads constructor(
 
         strokeRenderer.preparePaint(strokeColor, strokeBrush.isEraser)
         if (strokeBrush.isEraser) {
-            // Vista previa del borrador: se "borra" sobre una copia temporal de la capa.
             val bounds = strokeBounds()
+            canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
+            val clipSave = canvas.save()
+            canvas.clipRect(bounds)
+            canvas.drawRect(bounds, paperPaint)
             val save = strokeRenderer.saveLayer(canvas, bounds)
             canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
             strokeRenderer.replayStroke(canvas, pointsX, pointsY, pointsW, pointCount)
             canvas.restoreToCount(save)
+            canvas.restoreToCount(clipSave)
         } else {
             canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
             strokeRenderer.drawBrushStroke(
@@ -128,11 +151,20 @@ class DrawingView @JvmOverloads constructor(
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        val isStylus = event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS
+        if (!inputEnabled) return true
+        val actionIndex = event.actionIndex
+        val actionToolType = if (actionIndex in 0 until event.pointerCount) {
+            event.getToolType(actionIndex)
+        } else {
+            MotionEvent.TOOL_TYPE_UNKNOWN
+        }
+        val isStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                activeStylus = isStylus
                 isTransforming = false
+                if (!isStylus && activeStylus) return true
                 val point = viewport.mapToCanvas(event.x, event.y)
                 if (!viewport.isInsideCanvas(point[0], point[1])) {
                     isDrawing = false
@@ -193,17 +225,33 @@ class DrawingView @JvmOverloads constructor(
 
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (event.pointerCount >= 2) {
+                    if (isStylus) {
+                        activeStylus = true
+                        if (strokeStartedWithFinger || isTransforming) cancelStroke()
+                        val point = viewport.mapToCanvas(event.getX(actionIndex), event.getY(actionIndex))
+                        if (viewport.isInsideCanvas(point[0], point[1])) {
+                            startStroke(point[0], point[1], event.getPressure(actionIndex),
+                                true, false)
+                            invalidate()
+                            return true
+                        }
+                    }
+                    if (activeStylus) return true
                     if (strokeStartedWithFinger) cancelStroke() else finishStroke()
                     isTransforming = true
                     viewport.beginGesture(event)
                 }
             }
 
-            MotionEvent.ACTION_POINTER_UP -> isTransforming = false
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (actionToolType == MotionEvent.TOOL_TYPE_STYLUS) activeStylus = false
+                isTransforming = false
+            }
 
             // CANCEL suele ser la palma o el sistema: se descarta el trazo.
             MotionEvent.ACTION_CANCEL -> {
                 cancelStroke()
+                activeStylus = false
                 isTransforming = false
             }
         }
@@ -212,6 +260,7 @@ class DrawingView @JvmOverloads constructor(
 
     /** Borra todo el dibujo. */
     fun clear() {
+        cancelStroke()
         try {
             history.clear()
         } catch (error: OutOfMemoryError) {
@@ -225,13 +274,21 @@ class DrawingView @JvmOverloads constructor(
     }
 
     fun undo() {
-        if (history.undo()) {
-            invalidate()
-            onStrokeCommitted?.invoke()
+        cancelStroke()
+        try {
+            if (history.undo()) {
+                invalidate()
+                onStrokeCommitted?.invoke()
+            } else {
+                onMemoryError?.invoke()
+            }
+        } catch (error: OutOfMemoryError) {
+            onMemoryError?.invoke()
         }
     }
 
     fun redo() {
+        cancelStroke()
         if (history.redo()) {
             invalidate()
             onStrokeCommitted?.invoke()
@@ -239,7 +296,7 @@ class DrawingView @JvmOverloads constructor(
     }
 
     fun snapshotLayer(): Bitmap {
-        return layerBitmap.copy(Bitmap.Config.ARGB_8888, false)
+        return layerBitmap.copy(Bitmap.Config.ARGB_8888, true)
             ?: throw IllegalStateException("No se pudo copiar la capa.")
     }
 
@@ -304,6 +361,11 @@ class DrawingView @JvmOverloads constructor(
         strokeOpacity = brushSettings.opacity
         strokeStartedWithFinger = isFinger
         pointCount = 0
+        strokeMinX = x
+        strokeMaxX = x
+        strokeMinY = y
+        strokeMaxY = y
+        strokeMaxWidth = 0f
         recordPoint(x, y, widthFor(pressure, isStylus, strokeBrush, strokeSizeDp))
     }
 
@@ -329,6 +391,19 @@ class DrawingView @JvmOverloads constructor(
         pointsY[pointCount] = y
         pointsW[pointCount] = w
         pointCount++
+        if (pointCount == 1) {
+            strokeMinX = x
+            strokeMaxX = x
+            strokeMinY = y
+            strokeMaxY = y
+            strokeMaxWidth = w
+        } else {
+            strokeMinX = min(strokeMinX, x)
+            strokeMaxX = maxOf(strokeMaxX, x)
+            strokeMinY = min(strokeMinY, y)
+            strokeMaxY = maxOf(strokeMaxY, y)
+            strokeMaxWidth = maxOf(strokeMaxWidth, w)
+        }
     }
 
     /** Pasa el trazo en curso al Bitmap (se hace una sola vez por trazo). */
@@ -354,6 +429,7 @@ class DrawingView @JvmOverloads constructor(
             } catch (error: OutOfMemoryError) {
                 before?.recycle()
                 onMemoryError?.invoke()
+                onStrokeCommitted?.invoke()
             }
         }
         pointCount = 0
@@ -361,24 +437,13 @@ class DrawingView @JvmOverloads constructor(
     }
 
     private fun strokeBounds(): Rect {
-        var minX = pointsX[0]
-        var maxX = pointsX[0]
-        var minY = pointsY[0]
-        var maxY = pointsY[0]
-        var maxWidth = pointsW[0]
-        for (i in 1 until pointCount) {
-            minX = min(minX, pointsX[i])
-            maxX = maxOf(maxX, pointsX[i])
-            minY = min(minY, pointsY[i])
-            maxY = maxOf(maxY, pointsY[i])
-            maxWidth = maxOf(maxWidth, pointsW[i])
-        }
-        val padding = maxWidth / 2f + 2f
-        val left = floor(minX - padding).toInt().coerceIn(0, currentCanvasWidth - 1)
-        val top = floor(minY - padding).toInt().coerceIn(0, currentCanvasHeight - 1)
-        val right = ceil(maxX + padding).toInt().coerceIn(left + 1, currentCanvasWidth)
-        val bottom = ceil(maxY + padding).toInt().coerceIn(top + 1, currentCanvasHeight)
-        return Rect(left, top, right, bottom)
+        val padding = strokeMaxWidth / 2f + 2f
+        val left = floor(strokeMinX - padding).toInt().coerceIn(0, currentCanvasWidth - 1)
+        val top = floor(strokeMinY - padding).toInt().coerceIn(0, currentCanvasHeight - 1)
+        val right = ceil(strokeMaxX + padding).toInt().coerceIn(left + 1, currentCanvasWidth)
+        val bottom = ceil(strokeMaxY + padding).toInt().coerceIn(top + 1, currentCanvasHeight)
+        strokeBoundsRect.set(left, top, right, bottom)
+        return strokeBoundsRect
     }
 
     private fun cancelStroke() {

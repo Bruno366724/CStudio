@@ -1,6 +1,20 @@
 # Contexto del proyecto: app de dibujo para Android (Kotlin)
 
-> Pegá este archivo al inicio del chat de Copilot, o guardalo como `.github/copilot-instructions.md` en la raíz del proyecto.
+Este archivo está pensado para entregarle a Claude u otra IA junto con el repositorio. Describe el objetivo, las decisiones que ya están implementadas y el trabajo que todavía falta.
+
+## Cómo usar este contexto
+
+- Responde en español.
+- Explica conceptos de Android comparándolos con C# cuando sea útil.
+- Antes de proponer cambios, distingue entre hechos comprobados, pendientes de validar y decisiones que todavía requieren la aprobación del usuario.
+- No agregues librerías ni dependencias sin preguntar.
+- Implementa cambios pequeños y localizados. No refactorices áreas no relacionadas.
+- En archivos Kotlin, preferí código completo y compilable.
+- Ejecutá primero el flujo de validación del proyecto:
+  1. `.\gradlew assembleDebug`
+  2. `.\gradlew connectedDebugAndroidTest`
+- En Android, todo el acceso a disco pesado debe ejecutarse fuera del hilo principal.
+- No cierres corrutinas con capturas parciales: conserva `CancellationException`, captura `Exception` y `OutOfMemoryError` donde corresponda.
 
 ## Qué estoy construyendo
 App de dibujo simple para Android, al estilo de Ibis Paint pero mucho más básica. Es un regalo de mesiversario para mi novia (artista y animadora) y tiene que poder usarla en su tableta Samsung con S Pen. **Fecha límite: 2 de diciembre de 2026.**
@@ -22,6 +36,122 @@ Estudiante de sistemas. Sé C#, POO y SQL. Soy nuevo en Kotlin y en Android. Cua
 - minSdk 26, compileSdk 37, targetSdk 37.
 - Sin librerías pesadas de terceros. Si hace falta alguna, preguntame antes.
 - Dispositivos: celular Motorola G85 (Android, sin lápiz) conectado por USB para pruebas; destino final: tableta Samsung Android con S Pen.
+
+## Estado técnico resumido
+
+- Proyecto Gradle Android con Kotlin y Compose.
+- `namespace`/`applicationId`: `com.example.cstudio`.
+- `compileSdk`/`targetSdk`: 37.
+- `minSdk`: 26.
+- `versionCode`: 1.
+- `versionName`: 1.0.
+- El APK debug se genera en `CStudio/app/build/outputs/apk/debug/app-debug.apk`.
+- Las pruebas instrumentadas usan `AndroidJUnit4`, `androidx.test` y Compose test.
+- El respaldo automático está deshabilitado para no copiar los proyectos privados de `filesDir/projects`.
+- `MainActivity` detecta cambios de orientación/redimensionado con `configChanges` para no recrearla innecesariamente.
+
+## Arquitectura de ejecución
+
+La app tiene una única `MainActivity` y dos pantallas principales controladas por estado Compose:
+
+1. `HOME`: galería de proyectos.
+2. `EDITOR`: barra de herramientas, `AndroidView` con `DrawingView` y diálogo de exportación.
+
+`MainActivity` funciona como coordinador:
+
+- Guarda `currentProject`, `projectReady`, `dirty`, `isBusy` y la pantalla actual.
+- Inicia/pausa el autosave.
+- Guarda, carga, crea, abre, renombra y elimina proyectos bajo un `Mutex` común.
+- Usa `Dispatchers.IO` para operaciones de disco.
+- Usa `NonCancellable + Dispatchers.IO` para guardados y exportaciones que deben terminar aunque la Activity pierda el ciclo de vida.
+- Rehabilita o bloquea la entrada del lienzo durante carga, guardado y navegación.
+
+## Flujo del lienzo
+
+El contenido dibujado vive en un `Bitmap` ARGB_8888 mutable administrado por `DrawingView`.
+
+- Un trazo activo no se modifica directamente en el bitmap de cada evento.
+- Los puntos se guardan en arrays reutilizados y se convierten en curvas cuadráticas al representar la vista.
+- Al soltar el lápiz o el dedo, `finishStroke()` captura el rectángulo afectado, dibuja el trazo en el bitmap una sola vez y crea una entrada de historial.
+- El borrador usa `PorterDuff.Mode.DST_OUT`.
+- La opacidad se aplica al pincel; el borrador no debe heredarla sin una decisión explícita de diseño.
+- `onDraw()` dibuja el fondo, el papel blanco, el bitmap confirmado y la vista previa del trazo activo.
+- `invalidate()` solicita el redibujado completo; no se usa `invalidateRect`, porque Android moderno no garantiza esa optimización.
+
+## Gestos y entrada
+
+`DrawingView.onTouchEvent()` distingue la entrada por `MotionEvent`:
+
+- `TOOL_TYPE_STYLUS`: dibuja.
+- `TOOL_TYPE_FINGER`: inicia gestos de dos dedos.
+- Se usan puntos históricos y presión donde están disponibles.
+- Mientras existe un lápiz activo se intenta ignorar los punteros de dedo adicionales.
+- `ACTION_CANCEL` cancela el trazo activo.
+- `undo()`, `redo()` y `clear()` cancelan primero un trazo en curso.
+- `inputEnabled = false` descarta entradas táctiles mientras se carga o se guarda.
+
+`Viewport` administra una `Matrix` de escala y desplazamiento:
+
+- Convierte coordenadas de pantalla a coordenadas del lienzo.
+- Ajusta la vista con `fitScale`.
+- Permite zoom mínimo de 0.5 × el ajuste y un máximo de al menos 800 %.
+- Limita el pan para mantener una parte visible del lienzo.
+- Conserva o adapta relativamente zoom/pan al cambiar el tamaño de la vista.
+
+## Pinceles
+
+- `Brush.kt`: datos mínimos del pincel.
+- `Brushes.kt`: pincel normal y borrador.
+- `BrushSettings.kt`: color, tamaño, opacidad y pincel seleccionado.
+- `StrokeRenderer.kt`: presión, curvas Bézier, opacidad y borrado.
+- El ancho se expresa actualmente como `dp × density / fitScale`; esto hace que el tamaño en píxeles de lienzo dependa de la pantalla y del zoom.
+
+## Historial
+
+`History` guarda como unidad acotada el rectángulo afectado por cada trazo.
+
+- Máximo configurado: 20 entradas.
+- Límite de memoria: 64 MB.
+- Al confirmar un trazo se conserva `before`.
+- Al deshacer se captura `after` justo antes de restaurar `before`.
+- Al rehacer se restaura `after`.
+- Si falta memoria al capturar el estado posterior, se informa `onMemoryError` y se conserva la entrada sin perder el dibujo.
+- `clear()` crea una entrada especial que borra el lienzo completo.
+
+Una revisión futura debería volver a verificar los cálculos de `historyBytes` en `undo()` y el tratamiento de OOM, aunque las pruebas existentes pasan.
+
+## Persistencia
+
+Los proyectos viven en:
+
+`filesDir/projects/<uuid>/`
+
+Contenido típico:
+
+- `project.json`: metadatos versionados.
+- `project.json.bak`: copia de respaldo del JSON.
+- `layer_0.png`: capa actual.
+- `thumbnail.png`: miniatura cuadrada de 256 × 256.
+- Archivos temporales `*.tmp` durante escrituras.
+
+Formato JSON:
+
+- Versión 1: un único `canvasSize`.
+- Versión 2: `canvasWidth` y `canvasHeight` separados.
+- La lista `layers` ya existe y es extensible, aunque la UI/editor actual solo soporta una capa.
+
+`ProjectStorage`:
+
+- Escribe capas y metadatos de forma atómica.
+- Decodifica las capas como bitmaps mutables ARGB_8888.
+- Crea una miniatura con proporción contenida y barras blancas.
+- Conserva una copia `.bak` antes de reemplazar `project.json`.
+- Si el JSON falla, intenta usar el respaldo.
+- Si no hay respaldo usable pero existe `layer_0.png`, reconstruye metadatos mínimos con nombre "Recuperado".
+- Conserva proyectos con versión mayor que 2 sin modificarlos.
+- Limpia temporales y carpetas incompletas al iniciar.
+
+La bandera `dirty` evita reescribir el proyecto si no hubo cambios. Se activa al confirmar trazos, deshacer, rehacer o limpiar. Solo se desactiva después de un guardado exitoso.
 
 ## Funciones planificadas (por prioridad)
 Para la entrega del 2 de diciembre el objetivo es completar el Bloque 1; el Bloque 2 solo si sobra tiempo. Todo lo demás queda para versiones posteriores. Marcá con [x] lo que ya esté hecho.
@@ -73,9 +203,9 @@ Antes de implementar una función que afecte la arquitectura (capas, zoom, anima
   - Dos dedos (`TOOL_TYPE_FINGER`) hacen pan y zoom.
   - Cuidar `ACTION_CANCEL` por apoyo de la palma.
 - Suavizado de trazos con curvas Bézier cuadráticas entre puntos.
-- Deshacer/rehacer: guardar copia del rectángulo afectado antes de cada trazo, máximo ~20 pasos.
+- Deshacer/rehacer: máximo 20 pasos y 64 MB. Cada entrada guarda el estado anterior y captura el estado posterior al deshacer.
 - Zoom y pan con `Matrix`.
-- Guardado: almacenamiento interno de la app. Exportar PNG con `MediaStore`.
+- Guardado: almacenamiento interno de la app. Exportar PNG, JPG, WEBP y PDF con `MediaStore`.
 - Los proyectos viven en `filesDir/projects/<uuid>` con metadatos JSON versionados, capas PNG ARGB_8888 y miniaturas de 256×256. El autosave usa debounce de 2 segundos y también guarda al pausar la Activity.
 - El JSON ya contiene una lista de capas extensible; por ahora la interfaz solo abre y edita proyectos de una capa.
 - Rendimiento: no crear objetos dentro de `onDraw` ni de `onTouchEvent` (reutilizar `Path` y `Paint`). El `Bitmap` de la capa solo se modifica al terminar cada trazo, porque cada cambio obliga a subirlo completo a la GPU (no modificarlo en cada evento del lápiz). Usar `invalidate()` simple: el rectángulo sucio (`invalidate(l, t, r, b)`) está deprecado y Android moderno lo ignora.
@@ -130,6 +260,60 @@ Los archivos de la app están en `CStudio/app/src/main/java/com/example/cstudio/
 
 `CanvasDimensions.kt` centraliza los límites y el tamaño predeterminado. `project.json` usa formato v2 con ancho y alto separados, y los proyectos v1 se migran al abrirse.
 
+## Exportación
+
+`ImageExporter` usa `MediaStore`:
+
+- PNG/JPG/WEBP: `Pictures/CStudio`.
+- PDF: `Documents/CStudio`.
+- Android 8/9 usa escritura legacy y solicita permiso de almacenamiento.
+- Android 10+ crea una fila con `IS_PENDING` y la publica al terminar.
+- Ante un fallo o `OutOfMemoryError`, intenta eliminar la URI creada para evitar filas huérfanas.
+- JPG y fondo blanco se componen sobre blanco.
+- PNG/WEBP pueden usar transparencia.
+- PDF usa `PdfDocument` y limita la página a 842 × 1191 puntos manteniendo la proporción.
+- Los nombres usan nombre limpio, timestamp con segundos y extensión.
+
+## Pruebas reales
+
+La suite está en:
+
+- `app/src/androidTest/java/com/example/cstudio/ExampleInstrumentedTest.kt`
+- `app/src/androidTest/java/com/example/cstudio/HomeScreenInstrumentedTest.kt`
+
+`ExampleInstrumentedTest.kt` cubre:
+
+- Contexto de la app.
+- Pinch y pan.
+- Límites de trazos fuera del lienzo.
+- Undo, redo y limpiar.
+- Guardado/carga de capa y píxeles.
+- Rechazo de versiones desconocidas.
+- Migración v1 a v2.
+- Dimensiones de lienzo.
+- Historial en lienzo 4096 × 4096.
+- Cambio de capa.
+- Proyecto dañado y recuperación.
+- Ordenamiento, borrado y renombrado.
+- Debounce del autosave.
+- Composición sobre blanco.
+- Entrada bloqueada y borrador.
+- Carga mutable y metadatos dañados.
+- Exportación PNG, JPG, WEBP y PDF.
+
+`HomeScreenInstrumentedTest.kt` cubre:
+
+- Inicio en la galería y acción de nuevo proyecto.
+- Valor HD como preset predeterminado.
+
+Resultado validado el 26/11/2026:
+
+- `.\gradlew assembleDebug`: exitoso.
+- `.\gradlew connectedDebugAndroidTest`: exitoso en Moto G85.
+- Suite conectada: 21 pruebas, todas aprobadas.
+
+Este dispositivo no tiene lápiz. La presión real y el rechazo de palma todavía no pueden considerarse validados.
+
 ## Estado actual (actualizar a mano)
 
 Hecho y probado en el celular:
@@ -147,11 +331,33 @@ Hecho y probado en el celular:
 - [x] Diálogo de nuevo proyecto con presets y tamaño personalizado
 - [x] Exportación PNG/JPG/WEBP a Pictures/CStudio y PDF a Documents/CStudio; Android 8–9 solicita permiso de almacenamiento
 - [x] Pruebas instrumentadas de persistencia/recuperación, debounce, tamaños, migración, exportación, historial, Home y diálogo de creación
+- [x] Carga mutable de capas desde disco y conversión segura a ARGB_8888
+- [x] Vista previa del borrador sin ocultar el resto del dibujo
+- [x] Guardado/exportación no cancelables con reciclado controlado de snapshots
+- [x] Entrada bloqueada durante carga, guardado y navegación
+- [x] Guardado condicionado a cambios reales y recuperación de project.json
+- [x] Historial de memoria reducida con undo/redo exacto
+- [x] Límites básicos de zoom/pan y conservación relativa al redimensionar
 
 Pendiente de validar:
 - [ ] Presión real del S Pen y latencia en la tableta (el celular no tiene lápiz)
+- [ ] Rechazo de palma con la tableta Samsung real
+- [ ] Compilación release firmada y actualización instalada encima
 
 Las demás funciones están en la lista de arriba.
 
 **Problema actual / último error:**
-(escribirlo acá)
+Sin errores conocidos en las pruebas conectadas ejecutadas en el Moto G85.
+
+## Limitaciones conocidas y trabajo que puede parecer hecho pero no está terminado
+
+- El sistema de capas existe solo en el modelo JSON; no hay UI ni edición multicapa.
+- No hay selector HSV completo, cuentagotas, estabilizador, relleno, formas ni transformaciones.
+- No hay botón S Pen, curva de presión ni rechazo avanzado de palma probado.
+- No hay línea de tiempo ni animación.
+- No hay copia de seguridad/exportación masiva de proyectos.
+- El APK release firmado todavía no está preparado.
+- Falta prueba real de 4096 × 4096 y canvas.maximumBitmapWidth en Samsung.
+- Faltan pruebas específicas de exportación fallida y filas MediaStore huérfanas.
+- Faltan pruebas específicas de doble navegación, recorrido completo de Activity recreada y undo/redo con trazos grandes.
+- El nombre original de exportación usa segundos, pero la regla aún puede colisionar si el mismo nombre se exporta varias veces exactamente en el mismo segundo.

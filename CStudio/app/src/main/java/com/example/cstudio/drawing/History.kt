@@ -12,7 +12,7 @@ internal class History(private val bitmap: Bitmap) {
     private data class HistoryEntry(
         val bounds: Rect,
         val before: Bitmap,
-        val after: Bitmap?,
+        var after: Bitmap?,
         val clearsBounds: Boolean = false
     ) {
         val byteSize: Long
@@ -34,7 +34,7 @@ internal class History(private val bitmap: Bitmap) {
     }
 
     fun commit(bounds: Rect, before: Bitmap) {
-        pushUndo(HistoryEntry(bounds, before, capture(bounds)))
+        pushUndo(HistoryEntry(bounds, before, null))
     }
 
     fun clear() {
@@ -46,6 +46,17 @@ internal class History(private val bitmap: Bitmap) {
 
     fun undo(): Boolean {
         val entry = undoStack.pollLast() ?: return false
+        entry.after?.recycle()
+        entry.after = null
+        historyBytes -= entry.byteSize
+        try {
+            val after = capture(entry.bounds)
+            entry.after = after
+            historyBytes += after.byteCount.toLong()
+        } catch (error: OutOfMemoryError) {
+            undoStack.addLast(entry)
+            return false
+        }
         restoreRegion(entry.bounds, entry.before)
         redoStack.addLast(entry)
         return true

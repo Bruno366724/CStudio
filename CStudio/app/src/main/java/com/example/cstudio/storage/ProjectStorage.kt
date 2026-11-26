@@ -29,6 +29,10 @@ data class ProjectLoadResult(val project: StoredProject, val recoveryError: IOEx
 class ProjectStorage(private val filesDir: File) {
     private val projectsDirectory = File(filesDir, PROJECTS_DIRECTORY)
 
+    init {
+        cleanupTemporaryFilesAndIncompleteProjects()
+    }
+
     fun createProject(
         name: String = DEFAULT_PROJECT_NAME,
         canvasWidth: Int = CanvasDimensions.DEFAULT_WIDTH,
@@ -115,8 +119,20 @@ class ProjectStorage(private val filesDir: File) {
             metadata.layers.forEach { layer ->
                 val file = File(directory, safeFileName(layer.archivo))
                 if (!file.isFile) throw IOException("Falta el archivo de una capa.")
-                val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+                val options = BitmapFactory.Options().apply {
+                    inMutable = true
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                val decoded = BitmapFactory.decodeFile(file.absolutePath, options)
                     ?: throw IOException("No se pudo leer una capa del proyecto.")
+                val bitmap = if (decoded.config != Bitmap.Config.ARGB_8888) {
+                    val converted = decoded.copy(Bitmap.Config.ARGB_8888, true)
+                    decoded.recycle()
+                    converted
+                } else {
+                    decoded
+                }
+                    ?: throw IOException("No se pudo convertir una capa a ARGB_8888.")
                 if (bitmap.width != metadata.canvasWidth || bitmap.height != metadata.canvasHeight) {
                     bitmap.recycle()
                     throw IOException("Una capa tiene dimensiones inesperadas.")
@@ -209,18 +225,27 @@ class ProjectStorage(private val filesDir: File) {
 
     private fun readMetadata(directory: File, migrateLegacy: Boolean = false): ProjectMetadata {
         val metadataFile = File(directory, METADATA_FILE)
-        if (!metadataFile.isFile) throw IOException("Falta project.json.")
-        val json = try {
-            JSONObject(metadataFile.readText())
-        } catch (exception: JSONException) {
-            throw IOException("project.json está dañado.", exception)
+        if (!metadataFile.isFile) {
+            return readBackupOrRecover(directory)
         }
-        val metadata = ProjectMetadata.fromJson(json)
+        val metadata = try {
+            val json = try {
+                JSONObject(metadataFile.readText())
+            } catch (exception: JSONException) {
+                throw IOException("project.json está dañado.", exception)
+            }
+            ProjectMetadata.fromJson(json).also {
+                if (migrateLegacy && json.optInt("version") == 1) {
+                    writeTextAtomically(metadataFile, it.toJson().toString(2))
+                }
+            }
+        } catch (exception: UnsupportedProjectVersionException) {
+            throw exception
+        } catch (exception: IOException) {
+            readBackupOrRecover(directory)
+        }
         if (metadata.id != directory.name) {
             throw IOException("El identificador del proyecto no coincide con su carpeta.")
-        }
-        if (migrateLegacy && json.optInt("version") == 1) {
-            writeTextAtomically(metadataFile, metadata.toJson().toString(2))
         }
         return metadata
     }
@@ -286,6 +311,13 @@ class ProjectStorage(private val filesDir: File) {
     private fun writeTextAtomically(target: File, content: String) {
         val temporary = temporaryFile(target)
         try {
+            if (target.name == METADATA_FILE && target.isFile) {
+                Files.copy(
+                    target.toPath(),
+                    File(target.parentFile, "$METADATA_FILE.bak").toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            }
             FileOutputStream(temporary).use { output ->
                 output.write(content.toByteArray(Charsets.UTF_8))
                 output.fd.sync()
@@ -317,6 +349,69 @@ class ProjectStorage(private val filesDir: File) {
 
     private fun temporaryFile(target: File): File {
         return File(target.parentFile, "${target.name}.${UUID.randomUUID()}.tmp")
+    }
+
+    private fun readBackupOrRecover(directory: File): ProjectMetadata {
+        val metadataFile = File(directory, METADATA_FILE)
+        val backupFile = File(directory, "$METADATA_FILE.bak")
+        if (backupFile.isFile) {
+            try {
+                val backup = ProjectMetadata.fromJson(JSONObject(backupFile.readText()))
+                if (backup.id == directory.name) {
+                    writeTextAtomically(metadataFile, backup.toJson().toString(2))
+                    return backup
+                }
+            } catch (exception: Exception) {
+                if (exception is UnsupportedProjectVersionException) throw exception
+            }
+        }
+
+        val layerFile = File(directory, "layer_0.png")
+        if (!layerFile.isFile) throw IOException("No hay metadatos utilizables ni una capa recuperable.")
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(layerFile.absolutePath, bounds)
+        if (bounds.outWidth !in 64..4096 || bounds.outHeight !in 64..4096) {
+            throw IOException("La capa recuperada tiene dimensiones inválidas.")
+        }
+        val now = System.currentTimeMillis()
+        val recovered = ProjectMetadata(
+            id = directory.name,
+            name = "Recuperado",
+            createdAt = now,
+            modifiedAt = now,
+            canvasWidth = bounds.outWidth,
+            canvasHeight = bounds.outHeight,
+            layers = listOf(
+                ProjectLayerMetadata("layer-0", "layer_0.png", true, 1f)
+            )
+        )
+        writeTextAtomically(metadataFile, recovered.toJson().toString(2))
+        return recovered
+    }
+
+    private fun cleanupTemporaryFilesAndIncompleteProjects() {
+        if (!projectsDirectory.isDirectory) return
+        projectsDirectory.listFiles()?.forEach { entry ->
+            if (entry.isDirectory) {
+                entry.listFiles()?.forEach { file ->
+                    if (file.name.endsWith(".tmp") && file.isFile) file.delete()
+                }
+                val metadata = File(entry, METADATA_FILE)
+                val backup = File(entry, "$METADATA_FILE.bak")
+                val layer = File(entry, "layer_0.png")
+                val hasUnknownVersion = try {
+                    val source = if (metadata.isFile) metadata else if (backup.isFile) backup else null
+                    source?.let { JSONObject(it.readText()).optInt("version", 0) }?.let { it > 2 } == true
+                } catch (_: Exception) {
+                    false
+                }
+                if (!hasUnknownVersion && !metadata.isFile && !backup.isFile && !layer.isFile) {
+                    entry.deleteRecursively()
+                }
+            } else if (entry.name.endsWith(".tmp")) {
+                entry.delete()
+            }
+        }
     }
 
     private fun ensureDirectory(directory: File) {

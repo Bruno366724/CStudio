@@ -7,11 +7,13 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PorterDuff
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import com.example.cstudio.CanvasDimensions
 import java.io.File
 import java.io.IOException
@@ -110,18 +112,23 @@ class ImageExporter(private val contentResolver: ContentResolver) {
             }
             if (exception is IOException) throw exception
             throw IOException("No se pudo exportar el archivo.", exception)
+        } catch (error: OutOfMemoryError) {
+            uri?.let { insertedUri ->
+                try {
+                    contentResolver.delete(insertedUri, null, null)
+                } catch (cleanupException: Exception) {
+                    Log.e("ImageExporter", "No se pudo limpiar una exportación parcial.", cleanupException)
+                }
+            }
+            throw error
         } finally {
             if (outputBitmap !== layer) outputBitmap.recycle()
         }
     }
 
     internal fun composeOnWhite(layer: Bitmap): Bitmap {
-        val result = Bitmap.createBitmap(layer.width, layer.height, Bitmap.Config.ARGB_8888)
-        Canvas(result).apply {
-            drawColor(Color.WHITE)
-            drawBitmap(layer, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
-        }
-        return result
+        Canvas(layer).drawColor(Color.WHITE, PorterDuff.Mode.DST_OVER)
+        return layer
     }
 
     private fun writeImage(bitmap: Bitmap, options: ExportOptions, output: java.io.OutputStream) {
@@ -151,11 +158,22 @@ class ImageExporter(private val contentResolver: ContentResolver) {
     private fun writePdf(bitmap: Bitmap, output: java.io.OutputStream) {
         val document = PdfDocument()
         try {
+            val maxPageWidth = 842
+            val maxPageHeight = 1191
+            val scale = minOf(
+                1f,
+                maxPageWidth.toFloat() / bitmap.width,
+                maxPageHeight.toFloat() / bitmap.height
+            )
+            val pageWidth = (bitmap.width * scale).toInt().coerceAtLeast(1)
+            val pageHeight = (bitmap.height * scale).toInt().coerceAtLeast(1)
             val page = document.startPage(
-                PdfDocument.PageInfo.Builder(bitmap.width, bitmap.height, 1).create()
+                PdfDocument.PageInfo.Builder(pageWidth, pageHeight, 1).create()
             )
             page.canvas.drawColor(Color.WHITE)
-            page.canvas.drawBitmap(bitmap, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
+            val matrix = android.graphics.Matrix()
+            matrix.setScale(scale, scale)
+            page.canvas.drawBitmap(bitmap, matrix, Paint(Paint.FILTER_BITMAP_FLAG))
             document.finishPage(page)
             document.writeTo(output)
         } finally {
@@ -170,7 +188,7 @@ class ImageExporter(private val contentResolver: ContentResolver) {
             .trim('_', '.')
             .take(40)
             .ifBlank { "Sin_titulo" }
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         return "${cleanedName}_${timestamp}.${format.extension}"
     }
 

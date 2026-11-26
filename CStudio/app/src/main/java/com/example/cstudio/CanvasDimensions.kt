@@ -10,4 +10,8 @@ object CanvasDimensions {
     fun isValid(width: Int, height: Int): Boolean {
         return width in MIN_SIDE..MAX_SIDE && height in MIN_SIDE..MAX_SIDE
     }
+
+    fun isValidSide(value: Int): Boolean {
+        return value in MIN_SIDE..MAX_SIDE
+    }
 }

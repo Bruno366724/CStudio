@@ -70,6 +70,8 @@ class MainActivity : ComponentActivity() {
     private var newProjectDialogVisible by mutableStateOf(false)
     private var exportDialogVisible by mutableStateOf(false)
     private var pendingExportOptions: ExportOptions? = null
+    private var isBusy = false
+    private var dirty = false
     private val projectSaveMutex = PROCESS_PROJECT_MUTEX
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -91,7 +93,10 @@ class MainActivity : ComponentActivity() {
             saveCurrentProject()
         }
         drawingView.onStrokeCommitted = {
-            if (projectReady) autoSaveDebouncer.schedule()
+            if (projectReady) {
+                dirty = true
+                autoSaveDebouncer.schedule()
+            }
         }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -204,7 +209,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        if (projectReady) {
+        if (projectReady && dirty) {
             autoSaveDebouncer.cancel()
             val metadata = currentProject
             if (metadata != null) {
@@ -218,18 +223,28 @@ class MainActivity : ComponentActivity() {
                     lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
                         try {
                             val updatedMetadata = withContext(NonCancellable + Dispatchers.IO) {
-                                projectSaveMutex.withLock {
-                                    projectStorage.saveProject(metadata, listOf(snapshot))
+                                try {
+                                    projectSaveMutex.withLock {
+                                        projectStorage.saveProject(metadata, listOf(snapshot))
+                                    }
+                                } finally {
+                                    snapshot.recycle()
                                 }
                             }
-                            if (currentProject?.id == updatedMetadata.id) currentProject = updatedMetadata
+                            if (currentProject?.id == updatedMetadata.id) {
+                                currentProject = updatedMetadata
+                                dirty = false
+                            }
                         } catch (exception: IOException) {
+                            dirty = true
                             Log.e(TAG, "No se pudo guardar el proyecto al pausar.", exception)
+                        } catch (exception: Exception) {
+                            dirty = true
+                            Log.e(TAG, "Error inesperado al guardar al pausar.", exception)
                         } catch (error: OutOfMemoryError) {
+                            dirty = true
                             Log.e(TAG, "Memoria insuficiente para guardar el lienzo.", error)
                             showMemoryError()
-                        } finally {
-                            snapshot.recycle()
                         }
                     }
                 }
@@ -301,73 +316,122 @@ class MainActivity : ComponentActivity() {
         height: Int = CanvasDimensions.DEFAULT_HEIGHT
     ) {
         lifecycleScope.launch {
-            if (!saveCurrentProject()) return@launch
+            if (isBusy) return@launch
+            isBusy = true
+            drawingView.inputEnabled = false
             try {
+                if (!saveCurrentProject()) return@launch
                 val project = withContext(Dispatchers.IO) {
-                    projectStorage.createProject(name, width, height)
+                    projectSaveMutex.withLock {
+                        projectStorage.createProject(name, width, height)
+                    }
                 }
                 displayProject(project)
             } catch (exception: IOException) {
                 showStorageError("No se pudo crear el proyecto.", exception)
+            } catch (exception: Exception) {
+                Log.e(TAG, "Error inesperado al crear el proyecto.", exception)
+                showStorageError("No se pudo crear el proyecto.", IOException(exception.message, exception))
             } catch (error: OutOfMemoryError) {
                 showMemoryError()
+            } finally {
+                isBusy = false
+                drawingView.inputEnabled = projectReady
             }
         }
     }
 
     private fun openProject(projectId: String) {
         lifecycleScope.launch {
-            if (!saveCurrentProject()) return@launch
+            if (isBusy) return@launch
+            isBusy = true
+            drawingView.inputEnabled = false
             try {
+                if (!saveCurrentProject()) return@launch
                 val project = withContext(Dispatchers.IO) {
                     projectSaveMutex.withLock { projectStorage.loadProject(projectId) }
                 }
                 displayProject(project)
             } catch (exception: IOException) {
                 showStorageError("No se pudo abrir el proyecto.", exception)
+            } catch (exception: Exception) {
+                Log.e(TAG, "Error inesperado al abrir el proyecto.", exception)
+                showStorageError("No se pudo abrir el proyecto.", IOException(exception.message, exception))
             } catch (error: OutOfMemoryError) {
                 showMemoryError()
+            } finally {
+                isBusy = false
+                drawingView.inputEnabled = projectReady
             }
         }
     }
 
     private fun renameProject(projectId: String, name: String) {
         lifecycleScope.launch {
+            if (isBusy) return@launch
+            isBusy = true
             try {
-                withContext(Dispatchers.IO) { projectStorage.renameProject(projectId, name) }
+                withContext(Dispatchers.IO) {
+                    projectSaveMutex.withLock { projectStorage.renameProject(projectId, name) }
+                }
                 refreshHome()
             } catch (exception: IOException) {
                 showStorageError("No se pudo renombrar el proyecto.", exception)
+            } catch (exception: Exception) {
+                Log.e(TAG, "Error inesperado al renombrar.", exception)
+                showStorageError("No se pudo renombrar el proyecto.", IOException(exception.message, exception))
+            } finally {
+                isBusy = false
             }
         }
     }
 
     private fun deleteProject(projectId: String) {
         lifecycleScope.launch {
+            if (isBusy) return@launch
+            isBusy = true
             try {
-                withContext(Dispatchers.IO) { projectStorage.deleteProject(projectId) }
+                withContext(Dispatchers.IO) {
+                    projectSaveMutex.withLock { projectStorage.deleteProject(projectId) }
+                }
                 refreshHome()
             } catch (exception: IOException) {
                 showStorageError("No se pudo borrar el proyecto.", exception)
+            } catch (exception: Exception) {
+                Log.e(TAG, "Error inesperado al borrar.", exception)
+                showStorageError("No se pudo borrar el proyecto.", IOException(exception.message, exception))
+            } finally {
+                isBusy = false
             }
         }
     }
 
     private suspend fun navigateHome() {
-        if (!saveCurrentProject()) return
-        autoSaveDebouncer.cancel()
+        if (isBusy) return
+        isBusy = true
+        drawingView.inputEnabled = false
         try {
-            val emptyLayer = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
-            drawingView.replaceLayer(emptyLayer, takeOwnership = true)
-        } catch (error: OutOfMemoryError) {
-            showMemoryError()
+            if (!saveCurrentProject()) {
+                Toast.makeText(this, "No se pudo guardar. Reintenta o revisa el almacenamiento.", Toast.LENGTH_LONG).show()
+                return
+            }
+            autoSaveDebouncer.cancel()
+            try {
+                val emptyLayer = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+                drawingView.replaceLayer(emptyLayer, takeOwnership = true)
+            } catch (error: OutOfMemoryError) {
+                showMemoryError()
+            }
+            currentProject = null
+            projectReady = false
+            restoredProjectId = null
+            currentScreen = MainScreen.HOME
+            homeProjects = emptyList()
+            refreshHome()
+        } finally {
+            isBusy = false
+            drawingView.inputEnabled = projectReady
         }
-        currentProject = null
-        projectReady = false
-        restoredProjectId = null
-        currentScreen = MainScreen.HOME
-        homeProjects = emptyList()
-        refreshHome()
     }
 
     private fun displayProject(project: StoredProject) {
@@ -380,6 +444,7 @@ class MainActivity : ComponentActivity() {
             ownershipTransferred = true
             currentProject = project.metadata
             projectReady = true
+            dirty = false
             restoredProjectId = project.metadata.id
             currentScreen = MainScreen.EDITOR
             homeProjects = emptyList()
@@ -392,6 +457,7 @@ class MainActivity : ComponentActivity() {
     private suspend fun saveCurrentProject(): Boolean {
         val metadata = currentProject ?: return true
         if (!projectReady) return true
+        if (!dirty) return true
 
         val snapshot = try {
             drawingView.snapshotLayer()
@@ -401,20 +467,30 @@ class MainActivity : ComponentActivity() {
         }
         try {
             val updatedMetadata = withContext(Dispatchers.IO) {
-                projectSaveMutex.withLock {
-                    projectStorage.saveProject(metadata, listOf(snapshot))
+                try {
+                    projectSaveMutex.withLock {
+                        projectStorage.saveProject(metadata, listOf(snapshot))
+                    }
+                } finally {
+                    snapshot.recycle()
                 }
             }
             if (currentProject?.id == updatedMetadata.id) currentProject = updatedMetadata
+            dirty = false
             return true
         } catch (exception: IOException) {
+            dirty = true
             showStorageError("No se pudo guardar el proyecto.", exception)
             return false
+        } catch (exception: Exception) {
+            dirty = true
+            Log.e(TAG, "Error inesperado al guardar.", exception)
+            showStorageError("No se pudo guardar el proyecto.", IOException(exception.message, exception))
+            return false
         } catch (error: OutOfMemoryError) {
+            dirty = true
             showMemoryError()
             return false
-        } finally {
-            snapshot.recycle()
         }
     }
 
@@ -432,22 +508,25 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             try {
-                withContext(Dispatchers.IO) {
-                    ImageExporter(contentResolver).export(snapshot, projectName, options)
+                val result = withContext(NonCancellable + Dispatchers.IO) {
+                    try {
+                        ImageExporter(contentResolver).export(snapshot, projectName, options)
+                    } finally {
+                        snapshot.recycle()
+                    }
                 }
                 Toast.makeText(
                     this@MainActivity,
-                    "Archivo guardado en ${
-                        if (options.format == ExportFormat.PDF) "Documents/CStudio" else "Pictures/CStudio"
-                    }",
+                    "Archivo guardado en ${result.folder}/",
                     Toast.LENGTH_LONG
                 ).show()
             } catch (exception: IOException) {
                 showStorageError("No se pudo guardar el archivo.", exception)
+            } catch (exception: Exception) {
+                Log.e(TAG, "Error inesperado al exportar.", exception)
+                showStorageError("No se pudo guardar el archivo.", IOException(exception.message, exception))
             } catch (error: OutOfMemoryError) {
                 showMemoryError()
-            } finally {
-                snapshot.recycle()
             }
         }
     }

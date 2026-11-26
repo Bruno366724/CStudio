@@ -20,15 +20,35 @@ internal class Viewport(
     private var lastFocusX = 0f
     private var lastFocusY = 0f
     private var lastSpan = 0f
+    private var viewWidth = 0
+    private var viewHeight = 0
 
     fun reset(width: Int, height: Int) {
         if (width <= 0 || height <= 0) return
+        viewWidth = width
+        viewHeight = height
         fitScale = min(width.toFloat() / canvasWidth, height.toFloat() / canvasHeight)
         val offsetX = (width - canvasWidth * fitScale) / 2f
         val offsetY = (height - canvasHeight * fitScale) / 2f
         matrix.setValues(
             floatArrayOf(fitScale, 0f, offsetX, 0f, fitScale, offsetY, 0f, 0f, 1f)
         )
+        updateInverse()
+    }
+
+    fun resize(oldWidth: Int, oldHeight: Int, width: Int, height: Int) {
+        if (oldWidth <= 0 || oldHeight <= 0 || width <= 0 || height <= 0) return
+        viewWidth = width
+        viewHeight = height
+        val scaleX = width.toFloat() / oldWidth
+        val scaleY = height.toFloat() / oldHeight
+        val scale = min(scaleX, scaleY)
+        matrix.postScale(scale, scale, width / 2f, height / 2f)
+        matrix.postTranslate(
+            (width - oldWidth * scale) / 2f,
+            (height - oldHeight * scale) / 2f
+        )
+        limitPan(width, height)
         updateInverse()
     }
 
@@ -66,18 +86,35 @@ internal class Viewport(
             matrix.getValues(matrixValues)
             val currentScale = matrixValues[Matrix.MSCALE_X]
             val minimumScale = fitScale * MIN_ZOOM
-            val maximumScale = fitScale * MAX_ZOOM
+            val maximumScale = maxOf(fitScale * MAX_ZOOM, 8f)
             val requestedScale = currentScale * span / lastSpan
             val newScale = requestedScale.coerceIn(minimumScale, maximumScale)
             val scaleFactor = newScale / currentScale
             matrix.postScale(scaleFactor, scaleFactor, lastFocusX, lastFocusY)
             matrix.postTranslate(focusX - lastFocusX, focusY - lastFocusY)
+            if (viewWidth > 0 && viewHeight > 0) limitPan(viewWidth, viewHeight)
             updateInverse()
         }
 
         lastFocusX = focusX
         lastFocusY = focusY
         lastSpan = span
+    }
+
+    private fun limitPan(width: Int, height: Int) {
+        matrix.getValues(matrixValues)
+        val scale = matrixValues[Matrix.MSCALE_X]
+        val canvasScreenWidth = canvasWidth * scale
+        val canvasScreenHeight = canvasHeight * scale
+        val minVisible = 64f
+
+        var tx = matrixValues[Matrix.MTRANS_X]
+        var ty = matrixValues[Matrix.MTRANS_Y]
+        tx = tx.coerceIn(minVisible - canvasScreenWidth, width - minVisible)
+        ty = ty.coerceIn(minVisible - canvasScreenHeight, height - minVisible)
+        matrixValues[Matrix.MTRANS_X] = tx
+        matrixValues[Matrix.MTRANS_Y] = ty
+        matrix.setValues(matrixValues)
     }
 
     private fun updateInverse() {

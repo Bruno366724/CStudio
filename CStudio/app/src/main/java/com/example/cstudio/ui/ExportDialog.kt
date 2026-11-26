@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import com.example.cstudio.storage.ExportBackground
 import com.example.cstudio.storage.ExportFormat
 import com.example.cstudio.storage.ExportOptions
+import kotlin.math.roundToInt
 
 @Composable
 fun ExportDialog(
@@ -73,9 +74,9 @@ fun ExportDialog(
                     Text("Calidad: ${quality.toInt()}")
                     Slider(
                         value = quality,
-                        onValueChange = { quality = it },
+                        onValueChange = { quality = it.coerceIn(1f, 100f).roundToInt().toFloat() },
                         valueRange = 1f..100f,
-                        steps = 98
+                        steps = 0
                     )
                 }
                 if (supportsBackground) {

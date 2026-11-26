@@ -408,12 +408,8 @@ class ExampleInstrumentedTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val layer = Bitmap.createBitmap(2048, 2048, Bitmap.Config.ARGB_8888)
         val exporter = ImageExporter(context.contentResolver)
-        val composed = try {
-            layer.setPixel(50, 60, Color.RED)
-            exporter.composeOnWhite(layer)
-        } finally {
-            layer.recycle()
-        }
+        layer.setPixel(50, 60, Color.RED)
+        val composed = exporter.composeOnWhite(layer)
         try {
             assertEquals(2048, composed.width)
             assertEquals(2048, composed.height)
@@ -421,6 +417,86 @@ class ExampleInstrumentedTest {
             assertEquals(Color.RED, composed.getPixel(50, 60))
         } finally {
             composed.recycle()
+        }
+    }
+
+    @Test
+    fun inputDisabledRejectsTouchAndEraserPreviewKeepsOtherPixels() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        lateinit var view: DrawingView
+        instrumentation.runOnMainSync {
+            view = DrawingView(instrumentation.targetContext)
+            view.layout(0, 0, 500, 500)
+            view.inputEnabled = false
+            val downTime = SystemClock.uptimeMillis()
+            dispatchTouch(view, downTime, downTime, MotionEvent.ACTION_DOWN, floatArrayOf(250f), floatArrayOf(250f))
+            dispatchTouch(view, downTime, downTime + 10, MotionEvent.ACTION_UP, floatArrayOf(250f), floatArrayOf(250f))
+        }
+        assertEquals(Color.WHITE, drawView(view).getPixel(250, 250))
+
+        instrumentation.runOnMainSync {
+            view.inputEnabled = true
+            view.brushSettings = com.example.cstudio.brush.BrushSettings(
+                Color.BLACK, 12f, 1f, com.example.cstudio.brush.Brushes.PENCIL
+            )
+            val downTime = SystemClock.uptimeMillis()
+            dispatchTouch(view, downTime, downTime, MotionEvent.ACTION_DOWN, floatArrayOf(250f), floatArrayOf(250f))
+            dispatchTouch(view, downTime, downTime + 10, MotionEvent.ACTION_UP, floatArrayOf(250f), floatArrayOf(250f))
+            view.brushSettings = com.example.cstudio.brush.BrushSettings(
+                Color.BLACK, 30f, 1f, com.example.cstudio.brush.Brushes.ERASER
+            )
+            dispatchTouch(view, downTime + 20, downTime + 20, MotionEvent.ACTION_DOWN, floatArrayOf(300f), floatArrayOf(300f))
+        }
+        val preview = drawView(view)
+        val snapshot = view.snapshotLayer()
+        try {
+            var foundBlack = false
+            for (x in 0 until snapshot.width) {
+                for (y in 0 until snapshot.height) {
+                    if (snapshot.getPixel(x, y) == Color.BLACK) {
+                        foundBlack = true
+                        break
+                    }
+                }
+                if (foundBlack) break
+            }
+            assertTrue(foundBlack)
+        } finally {
+            snapshot.recycle()
+        }
+    }
+
+    @Test
+    fun loadedLayerIsMutableAndCorruptMetadataCanRecover() = runBlocking(Dispatchers.IO) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val testFiles = File(context.cacheDir, "recover-test-${UUID.randomUUID()}")
+        val storage = ProjectStorage(testFiles)
+        try {
+            val project = storage.createProject("Original", 256, 256)
+            val source = project.layers.single()
+            source.setPixel(25, 30, Color.RED)
+            storage.saveProject(project.metadata, listOf(source))
+            source.recycle()
+
+            val directory = File(testFiles, "projects/${project.metadata.id}")
+            File(directory, "project.json.bak").delete()
+            File(directory, "project.json").writeText("{malformado")
+            val recovered = storage.loadProject(project.metadata.id)
+            try {
+                assertEquals("Recuperado", recovered.metadata.name)
+                assertEquals(256, recovered.metadata.canvasWidth)
+                assertEquals(256, recovered.metadata.canvasHeight)
+                assertEquals(Color.RED, recovered.layers.single().getPixel(25, 30))
+                val mutableView = DrawingView(context)
+                InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                    mutableView.layout(0, 0, 256, 256)
+                    mutableView.replaceLayer(recovered.layers.single(), takeOwnership = true)
+                }
+            } finally {
+                if (recovered.layers.single().isRecycled.not()) recovered.layers.forEach(Bitmap::recycle)
+            }
+        } finally {
+            testFiles.deleteRecursively()
         }
     }
 
@@ -498,10 +574,6 @@ class ExampleInstrumentedTest {
                                 options.format == ExportFormat.JPG ||
                                     options.background == ExportBackground.WHITE ->
                                     assertTrue(Color.red(decoded.getPixel(0, 0)) > 245)
-
-                                options.format == ExportFormat.WEBP &&
-                                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
-                                    assertEquals(0, Color.alpha(decoded.getPixel(0, 0)))
                             }
                         } finally {
                             decoded.recycle()

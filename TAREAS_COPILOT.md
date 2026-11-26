@@ -201,7 +201,7 @@ En cada frame de un trazo en curso, `StrokeRenderer.replayStroke` reconstruye y 
 ## Checklist final
 
 - [x] Tarea 1: puntero activo del lápiz y pruebas de palma + lápiz
-- [ ] Tarea 2: deshacer sin historial ya no muestra "Memoria insuficiente"
+- [x] Tarea 2: deshacer sin historial ya no muestra "Memoria insuficiente"
 - [ ] Tarea 3: autoguardado sin falsos errores, `CancellationException` relanzada
 - [ ] Tarea 4: `historyBytes` consistente con el invariante
 - [ ] Tarea 5: `assembleRelease` compila y se reportó el resultado

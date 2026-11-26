@@ -215,6 +215,27 @@ class ExampleInstrumentedTest {
     }
 
     @Test
+    fun undoWithoutHistoryDoesNotReportMemoryErrorOrChangeBitmap() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        lateinit var view: DrawingView
+        var memoryErrors = 0
+        instrumentation.runOnMainSync {
+            view = DrawingView(instrumentation.targetContext)
+            view.layout(0, 0, 500, 500)
+            view.onMemoryError = { memoryErrors++ }
+            view.undo()
+        }
+
+        assertEquals(0, memoryErrors)
+        val snapshot = view.snapshotLayer()
+        try {
+            assertFalse(hasOpaquePixel(snapshot, 0, snapshot.width, 0, snapshot.height))
+        } finally {
+            snapshot.recycle()
+        }
+    }
+
+    @Test
     fun projectLayerRoundTripsWithoutChangingPixels() = runBlocking(Dispatchers.IO) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val testFiles = File(context.cacheDir, "storage-test-${UUID.randomUUID()}")

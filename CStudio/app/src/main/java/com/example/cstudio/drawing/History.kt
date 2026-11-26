@@ -29,6 +29,12 @@ internal class History(private val bitmap: Bitmap) {
     private val redoStack = ArrayDeque<HistoryEntry>()
     private var historyBytes = 0L
 
+    val canUndo: Boolean
+        get() = undoStack.isNotEmpty()
+
+    val canRedo: Boolean
+        get() = redoStack.isNotEmpty()
+
     fun capture(bounds: Rect): Bitmap {
         return Bitmap.createBitmap(bitmap, bounds.left, bounds.top, bounds.width(), bounds.height())
     }

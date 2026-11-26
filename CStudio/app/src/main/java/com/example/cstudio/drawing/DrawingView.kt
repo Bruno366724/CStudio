@@ -323,6 +323,7 @@ class DrawingView @JvmOverloads constructor(
 
     fun undo() {
         cancelStroke()
+        if (!history.canUndo) return
         try {
             if (history.undo()) {
                 invalidate()

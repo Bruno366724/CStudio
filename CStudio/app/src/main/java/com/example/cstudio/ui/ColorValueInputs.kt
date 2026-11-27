@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,8 +34,13 @@ fun ColorValueInputs(
     modifier: Modifier = Modifier
 ) {
     val focusManager = LocalFocusManager.current
-    var hexInput by remember(argb, allowAlpha) {
+    var hexInput by remember(allowAlpha) {
         mutableStateOf(ColorUtils.toHex(argb, includeAlpha = (argb ushr 24) != 0xFF))
+    }
+    LaunchedEffect(argb, allowAlpha) {
+        if (ColorUtils.parseHex(hexInput) != argb) {
+            hexInput = ColorUtils.toHex(argb, includeAlpha = (argb ushr 24) != 0xFF)
+        }
     }
     val parsedHex = ColorUtils.parseHex(hexInput)
     val rgb = ColorUtils.argbToRgb(argb)

@@ -63,6 +63,37 @@ class ColorPickerInputTest {
     }
 
     @Test
+    fun validHexPrefixDoesNotResetInputWhileTyping() {
+        val selectedColor = mutableStateOf(0xFF000000.toInt())
+        composeRule.setContent {
+            MaterialTheme {
+                ColorValueInputs(
+                    argb = selectedColor.value,
+                    allowAlpha = true,
+                    onColorChanged = { selectedColor.value = it },
+                    onSelectionFinished = {}
+                )
+            }
+        }
+
+        val hexField = composeRule.onNodeWithTag("color-hex-input")
+        hexField.performTextClearance()
+        hexField.performTextInput("#")
+        hexField.performTextInput("F")
+        hexField.performTextInput("F")
+        hexField.performTextInput("0")
+        hexField.assertTextContains("#FF0")
+        hexField.performTextInput("0")
+        hexField.performTextInput("0")
+        hexField.performTextInput("0")
+
+        composeRule.runOnIdle {
+            assertEquals(0xFFFF0000.toInt(), selectedColor.value)
+        }
+        hexField.assertTextContains("#FF0000")
+    }
+
+    @Test
     fun tappingHueWheelSelectsColorAndFinishesInteraction() {
         val selectedColor = mutableStateOf(0xFFFFFFFF.toInt())
         val finishedColor = mutableStateOf(0)

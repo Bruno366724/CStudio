@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.util.Log
 import com.example.cstudio.CanvasDimensions
 import com.example.cstudio.drawing.LayerStack
+import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
@@ -113,6 +114,7 @@ class ProjectStorage(private val filesDir: File) {
         }
         val directory = projectDirectory(metadata.id)
         ensureDirectory(directory)
+        val preservedRecoveryFiles = readPreservedRecoveryLayerFiles(directory)
 
         metadata.layers.forEach { layerMetadata ->
             val target = File(directory, safeFileName(layerMetadata.archivo))
@@ -135,7 +137,8 @@ class ProjectStorage(private val filesDir: File) {
             File(directory, METADATA_FILE),
             updatedMetadata.toJson().toString(2)
         )
-        val referencedFiles = metadata.layers.map { safeFileName(it.archivo) }.toSet()
+        val referencedFiles = metadata.layers.map { safeFileName(it.archivo) }.toSet() +
+            preservedRecoveryFiles
         directory.listFiles()
             ?.filter { it.isFile && it.name.startsWith("layer_") && it.name.endsWith(".png") }
             ?.filter { it.name !in referencedFiles }
@@ -416,32 +419,95 @@ class ProjectStorage(private val filesDir: File) {
                 if (exception is UnsupportedProjectVersionException) throw exception
             }
         }
-
-        val layerFile = directory.listFiles()
+        // The original stack order cannot be reconstructed without project metadata.
+        val layerFiles = directory.listFiles()
             ?.filter { it.isFile && it.name.startsWith("layer_") && it.name.endsWith(".png") }
             ?.sortedBy(File::getName)
-            ?.firstOrNull()
-            ?: throw IOException("No hay metadatos utilizables ni una capa recuperable.")
+            .orEmpty()
+        val recoveredLayers = mutableListOf<ProjectLayerMetadata>()
+        val preservedFiles = mutableListOf<String>()
+        var canvasWidth: Int? = null
+        var canvasHeight: Int? = null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(layerFile.absolutePath, bounds)
-        if (bounds.outWidth !in 64..4096 || bounds.outHeight !in 64..4096) {
-            throw IOException("La capa recuperada tiene dimensiones inválidas.")
+
+        layerFiles.forEach { layerFile ->
+            bounds.outWidth = 0
+            bounds.outHeight = 0
+            BitmapFactory.decodeFile(layerFile.absolutePath, bounds)
+            val width = bounds.outWidth
+            val height = bounds.outHeight
+            if (width !in 64..4096 || height !in 64..4096) {
+                preservedFiles += layerFile.name
+                return@forEach
+            }
+
+            if (canvasWidth == null) {
+                canvasWidth = width
+                canvasHeight = height
+            }
+            if (width != canvasWidth || height != canvasHeight ||
+                recoveredLayers.size >= LayerStack.MAX_LAYERS ||
+                !LayerStack.canFit(width, height, recoveredLayers.size + 1)
+            ) {
+                preservedFiles += layerFile.name
+                return@forEach
+            }
+
+            val layerSuffix = layerFile.name.removePrefix("layer_").removeSuffix(".png")
+            recoveredLayers += ProjectLayerMetadata(
+                "layer-$layerSuffix",
+                layerFile.name,
+                true,
+                1f
+            )
+        }
+
+        if (recoveredLayers.isEmpty()) {
+            throw IOException("No hay metadatos utilizables ni una capa recuperable.")
         }
         val now = System.currentTimeMillis()
-        val layerSuffix = layerFile.name.removePrefix("layer_").removeSuffix(".png")
         val recovered = ProjectMetadata(
             id = directory.name,
             name = "Recuperado",
             createdAt = now,
             modifiedAt = now,
-            canvasWidth = bounds.outWidth,
-            canvasHeight = bounds.outHeight,
-            layers = listOf(
-                ProjectLayerMetadata("layer-$layerSuffix", layerFile.name, true, 1f)
-            )
+            canvasWidth = requireNotNull(canvasWidth),
+            canvasHeight = requireNotNull(canvasHeight),
+            layers = recoveredLayers
         )
+        if (preservedFiles.isNotEmpty()) {
+            val preservedJson = JSONArray().apply { preservedFiles.forEach(::put) }
+            writeTextAtomically(
+                File(directory, RECOVERY_PRESERVED_LAYERS_FILE),
+                preservedJson.toString()
+            )
+        }
         writeTextAtomically(metadataFile, recovered.toJson().toString(2))
         return recovered
+    }
+
+    private fun readPreservedRecoveryLayerFiles(directory: File): Set<String> {
+        val marker = File(directory, RECOVERY_PRESERVED_LAYERS_FILE)
+        if (!marker.isFile) return emptySet()
+        val files = try {
+            JSONArray(marker.readText())
+        } catch (exception: JSONException) {
+            throw IOException("La lista de capas preservadas está dañada.", exception)
+        }
+        return buildSet {
+            repeat(files.length()) { index ->
+                val fileName = try {
+                    files.getString(index)
+                } catch (exception: JSONException) {
+                    throw IOException("La lista de capas preservadas está dañada.", exception)
+                }
+                safeFileName(fileName)
+                if (!fileName.startsWith("layer_") || !fileName.endsWith(".png")) {
+                    throw IOException("La lista de capas preservadas no es válida.")
+                }
+                add(fileName)
+            }
+        }
     }
 
     private fun cleanupTemporaryFilesAndIncompleteProjects() {
@@ -489,6 +555,7 @@ class ProjectStorage(private val filesDir: File) {
         const val PROJECTS_DIRECTORY = "projects"
         const val METADATA_FILE = "project.json"
         const val THUMBNAIL_FILE = "thumbnail.png"
+        const val RECOVERY_PRESERVED_LAYERS_FILE = "recovery_preserved_layers.json"
         const val THUMBNAIL_SIZE = 256
         const val DEFAULT_PROJECT_NAME = "Sin título"
         const val MAX_PROJECT_NAME_LENGTH = 40

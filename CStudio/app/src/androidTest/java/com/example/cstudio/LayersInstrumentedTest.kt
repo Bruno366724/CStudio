@@ -22,6 +22,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
@@ -504,6 +505,82 @@ class LayersInstrumentedTest {
                 recovered.layers.forEach(Bitmap::recycle)
             }
         } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun recoveryRestoresAllLayerFilesWhenMetadataIsMissing() = runBlocking(Dispatchers.IO) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(context.cacheDir, "layer-recovery-multiple-${UUID.randomUUID()}")
+        val storage = ProjectStorage(root)
+        val project = storage.createProject("Recuperar varias", 64, 64)
+        val second = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.RED)
+        }
+        val third = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.BLUE)
+        }
+        val directory = File(root, "projects/${project.metadata.id}")
+        try {
+            val metadata = project.metadata.copy(
+                layers = project.metadata.layers + listOf(
+                    ProjectLayerMetadata("layer-second", "layer_second.png", true, 1f),
+                    ProjectLayerMetadata("layer-third", "layer_third.png", true, 1f)
+                )
+            )
+            storage.saveProject(metadata, listOf(project.layers.single(), second, third))
+            val layerFiles = listOf("layer_0.png", "layer_second.png", "layer_third.png")
+            File(directory, "project.json").delete()
+            File(directory, "project.json.bak").delete()
+
+            val recoveredStorage = ProjectStorage(root)
+            val recovered = recoveredStorage.loadProject(project.metadata.id)
+            try {
+                assertEquals(3, recovered.layers.size)
+                assertTrue(layerFiles.all { File(directory, it).isFile })
+                recoveredStorage.saveProject(recovered.metadata, recovered.layers)
+                assertTrue(layerFiles.all { File(directory, it).isFile })
+            } finally {
+                recovered.layers.forEach(Bitmap::recycle)
+            }
+        } finally {
+            project.layers.forEach(Bitmap::recycle)
+            second.recycle()
+            third.recycle()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun recoveryPreservesLayerFilesWithMismatchedDimensions() = runBlocking(Dispatchers.IO) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(context.cacheDir, "layer-recovery-mismatched-${UUID.randomUUID()}")
+        val storage = ProjectStorage(root)
+        val project = storage.createProject("Recuperar dimensiones", 64, 64)
+        val directory = File(root, "projects/${project.metadata.id}")
+        val mismatchedFile = File(directory, "layer_mismatched.png")
+        val mismatched = Bitmap.createBitmap(128, 64, Bitmap.Config.ARGB_8888)
+        try {
+            FileOutputStream(mismatchedFile).use {
+                assertTrue(mismatched.compress(Bitmap.CompressFormat.PNG, 100, it))
+            }
+            File(directory, "project.json").delete()
+            File(directory, "project.json.bak").delete()
+
+            val recoveredStorage = ProjectStorage(root)
+            val recovered = recoveredStorage.loadProject(project.metadata.id)
+            try {
+                assertEquals(listOf("layer_0.png"), recovered.metadata.layers.map { it.archivo })
+                assertTrue(mismatchedFile.isFile)
+                recoveredStorage.saveProject(recovered.metadata, recovered.layers)
+                assertTrue(mismatchedFile.isFile)
+            } finally {
+                recovered.layers.forEach(Bitmap::recycle)
+            }
+        } finally {
+            project.layers.forEach(Bitmap::recycle)
+            mismatched.recycle()
             root.deleteRecursively()
         }
     }

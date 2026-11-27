@@ -25,6 +25,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.example.cstudio.drawing.LayerInfo
 
@@ -65,6 +70,11 @@ fun LayersPanel(
                         .fillMaxWidth()
                         .heightIn(min = 48.dp)
                         .clickable { onSelectLayer(index) }
+                        .semantics {
+                            contentDescription = "Capa ${index + 1}"
+                            selected = index == activeLayerIndex
+                            role = Role.Button
+                        }
                         .padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -75,9 +85,17 @@ fun LayersPanel(
                     )
                     TextButton(
                         onClick = { onToggleVisibility(index, !info.visible) },
-                        modifier = Modifier.heightIn(min = 48.dp)
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .semantics {
+                                contentDescription = if (info.visible) {
+                                    "Ocultar capa ${index + 1}"
+                                } else {
+                                    "Mostrar capa ${index + 1}"
+                                }
+                            }
                     ) {
-                        Text(if (info.visible) "Oculta" else "Ver")
+                        Text(if (info.visible) "Ocultar" else "Mostrar")
                     }
                 }
             }

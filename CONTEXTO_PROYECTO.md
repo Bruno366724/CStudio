@@ -104,6 +104,7 @@ Implementados y probados el 26/11/2026 en Kotlin/Compose, sin dependencias exter
 
 - `color/ColorUtils.kt` ofrece parseo y formato HEX (incluyendo alfa) y conversiones RGB, HSL y HSV/HSB.
 - El selector ofrece modos rueda HSV, cuadro HSV y valores; entrada HEX/RGB/HSB, alfa, vista previa, copia y colores recientes. La rueda y los controles exponen semántica accesible y admiten interacción táctil y teclado.
+- `ui/ColorValueInputs.kt` conserva los prefijos HEX válidos mientras se escribe; el color se actualiza al completar la entrada sin reemplazar el texto parcial.
 - `color/RecentColorsRepository.kt` persiste el último color y un historial reciente deduplicado y limitado con `SharedPreferences`; maneja datos JSON corruptos.
 - El alfa ARGB seleccionado se combina con la opacidad del pincel tanto en la vista previa como en el trazo confirmado.
 - El cuentagotas toma muestras del bitmap del lienzo respetando el viewport, zoom y desplazamiento; los píxeles transparentes se componen sobre blanco. Se puede cancelar con el botón o Atrás. Si se toca fuera del lienzo, avisa y mantiene el modo activo.
@@ -162,10 +163,12 @@ Formato JSON:
 - Crea una miniatura con proporción contenida y barras blancas.
 - Conserva una copia `.bak` antes de reemplazar `project.json`.
 - Si el JSON falla, intenta usar el respaldo.
-- Si no hay respaldo usable pero existe algún `layer_*.png`, reconstruye metadatos mínimos con nombre "Recuperado".
+- Si no hay respaldo usable, reconstruye metadatos con las PNG de capas compatibles, ordenadas por nombre de archivo. El orden original no se puede recuperar sin metadatos.
+- Respeta el máximo de 20 capas y `LayerStack.canFit`; las PNG omitidas por dimensiones incompatibles o presupuesto se registran en `recovery_preserved_layers.json` para que guardados posteriores no las eliminen.
 - Conserva proyectos con versión mayor que 2 sin modificarlos.
 - Limpia temporales y carpetas incompletas al iniciar.
 - Guarda solo las capas con píxeles modificados, escribe primero las imágenes y metadatos atómicos y elimina archivos de capas huérfanos después.
+- Una medición instrumentada del inicio/limpieza con 30 proyectos de prueba de 64 × 64 dio 27,27 ms en el emulador API 37 (por debajo del umbral de 50 ms); el constructor no se modificó.
 
 La bandera `dirty` evita reescribir el proyecto si no hubo cambios. Se activa al confirmar trazos, deshacer, rehacer, limpiar o cambiar metadatos de capas. Solo se desactiva después de un guardado exitoso.
 
@@ -312,6 +315,7 @@ La suite está en:
 - `app/src/test/java/com/example/cstudio/color/ColorUtilsTest.kt`
 - `app/src/androidTest/java/com/example/cstudio/HomeScreenInstrumentedTest.kt`
 - `app/src/androidTest/java/com/example/cstudio/LayersInstrumentedTest.kt`
+- `app/src/androidTest/java/com/example/cstudio/LayersPanelAccessibilityTest.kt`
 
 `ExampleInstrumentedTest.kt` cubre:
 
@@ -337,22 +341,25 @@ La suite está en:
 - Inicio en la galería y acción de nuevo proyecto.
 - Valor HD como preset predeterminado.
 
-Resultado validado tras implementar capas:
+Resultado validado en la revisión del 26/11/2026:
 
-- `.\gradlew testDebugUnitTest`: 9 pruebas unitarias aprobadas.
-- `.\gradlew assembleDebug` y `.\gradlew assembleRelease`: compilaciones exitosas.
-- `LayersInstrumentedTest`: 13/13 pruebas instrumentadas aprobadas en el emulador API 37.
+- AndroidX Test de instrumentación: `espresso-core 3.7.0` y `androidx.test.ext:junit 1.3.0`, actualizados con aprobación del usuario. Espresso 3.7.0 evita el fallo de reflexión `InputManager.getInstance()` en API 37.
+- `.\gradlew assembleDebug`, `.\gradlew assembleDebugAndroidTest`, `.\gradlew testDebugUnitTest` y `.\gradlew assembleRelease`: compilaciones correctas; 9 pruebas unitarias aprobadas.
+- Suite instrumentada en el emulador API 37: **55/55 pruebas aprobadas**, incluidas 16 de `LayersInstrumentedTest`, 6 de color, 30 de `ExampleInstrumentedTest`, 2 de Home y 1 de accesibilidad.
+- La tarea Gradle `connectedDebugAndroidTest` intentó instalar el APK debug también en el Moto G85, donde hay un APK release firmado con otra firma. No se desinstaló ni se borraron datos del teléfono; la suite completa se ejecutó directamente en el emulador mediante `adb`.
 - Medición de miniatura en lienzo 4096 × 4096 con 2 capas: 9.176 ms en el emulador API 37 (referencia, no medición en Moto G85).
-- Suite completa en API 37: 50 pruebas, 43 aprobadas y 7 fallidas. Las 7 fallidas son pruebas UI que no inicializan Espresso 3.5.1 por `NoSuchMethodException: InputManager.getInstance`; las 13 pruebas de capas y las 30 de `ExampleInstrumentedTest` pasaron.
-- Las 35 pruebas instrumentadas anteriores habían pasado en el Moto G85. No se instalaron pruebas sobre el APK release firmado del teléfono para evitar borrar los proyectos locales.
+- Las 35 pruebas instrumentadas anteriores habían pasado en el Moto G85. No reemplazar su APK release firmado ni borrar sus proyectos para ejecutar instrumentación.
+- Sonda de memoria en emulador API 37, cuatro capas 4096 × 4096: guardado simulado (snapshot + escritura) pico de 518,19 MiB nativos / 3,37 MiB Java; exportación compuesta 325,97 MiB nativos / 2,26 MiB Java. No incluye el historial real ni todo el ciclo de `onPause`; no es medición de dispositivo físico.
+- Se propuso guardar snapshots de una capa por vez para reducir el pico; el usuario no autorizó esa optimización y no se implementó. Repetir la medición en la tableta Samsung antes de decidir cambios de memoria.
 - APK release generado sin firmar: `CStudio/app/build/outputs/apk/release/app-release-unsigned.apk`.
 - El usuario generó e instaló un APK release firmado con Android Studio y confirmó que abre y funciona correctamente. El archivo de firma y sus contraseñas se guardan fuera del repositorio.
+- Los seis commits de esta revisión están locales en `main`, no subidos a GitHub; último commit: `902046d`.
 
 El teléfono probado no tiene lápiz. La presión real y el rechazo de palma todavía no pueden considerarse validados en la Samsung con S Pen.
 
 ## Estado actual (actualizar a mano)
 
-Hecho y probado en el celular:
+Hecho e implementado:
 - [x] Proyecto creado y corriendo en el celular
 - [x] Trazo suavizado (Bézier con puntos históricos)
 - [x] Pincel con color, tamaño y opacidad
@@ -381,6 +388,11 @@ Hecho y probado en el celular:
 - [x] Límites básicos de zoom/pan y anclaje del lienzo al redimensionar
 - [x] Capas multicapa con agregar, borrar, reordenar, visibilidad, opacidad, renderizado, historial y persistencia
 - [x] Exportación, cuentagotas y miniaturas usan la composición visible de capas
+- [x] Recuperación de todas las capas compatibles desde PNG si se dañan los metadatos, preservando las omitidas
+- [x] Panel de capas con semántica accesible y acciones de visibilidad etiquetadas
+- [x] Aviso de máximo de 20 capas distinto del aviso de falta de memoria; aviso de capa oculta limitado a uno cada dos segundos
+- [x] Entrada HEX parcial estable al teclear
+- [x] Pruebas instrumentadas API 37 actualizadas y suite completa aprobada
 - [x] APK release firmado e instalado en el teléfono
 
 Pendiente de validar:
@@ -389,18 +401,20 @@ Pendiente de validar:
 
 Las demás funciones están en la lista de arriba.
 
-**Problema actual / último error:**
-La suite completa en API 37 continúa teniendo 7 fallos de inicialización de Espresso (`InputManager.getInstance`); las 13 pruebas de capas y el resto de pruebas no UI sí pasaron. El APK release firmado que ya está instalado en el Moto G85 no fue reemplazado.
+**Estado de la última revisión (26/11/2026):**
+La suite de 55 pruebas instrumentadas pasó en el emulador API 37 tras actualizar AndroidX Test. La ejecución Gradle multidispositivo no puede instalar el APK debug encima del APK release firmado del Moto G85 por diferencia de firmas; mantener intactos la instalación y los proyectos del teléfono. La medición de memoria supera 400 MiB al guardar, pero el usuario rechazó implementar el guardado secuencial. Falta repetir la medición y validar S Pen en la Samsung.
 
 ## Limitaciones conocidas y trabajo que puede parecer hecho pero no está terminado
 
-- El sistema multicapa pasó 13 pruebas en el emulador API 37, pero falta validación manual en una Samsung con S Pen y pruebas de estrés en el dispositivo objetivo para 20 capas y lienzos grandes.
+- El sistema multicapa pasó 16 pruebas en el emulador API 37; falta validación manual en una Samsung con S Pen y pruebas de estrés en el dispositivo objetivo para 20 capas y lienzos grandes.
 - El selector HSV y el cuentagotas del lienzo sí existen. Siguen pendientes las paletas personalizadas guardadas y el muestreo desde imágenes o desde otras apps.
 - No hay estabilizador, relleno, formas ni transformaciones.
 - No hay acción configurable para el botón del S Pen ni editor de curva de presión; el rechazo de palma aún no se ha validado en la tableta Samsung.
 - No hay línea de tiempo ni animación.
 - No hay copia de seguridad/exportación masiva de proyectos.
-- La suite completa de UI en API 37 requiere actualizar Espresso/AndroidX Test; la validación previa de 35 instrumentadas en Moto G85 pasó.
+- La suite completa de instrumentación en API 37 pasa con Espresso 3.7.0 / AndroidX JUnit 1.3.0. El Moto G85 conserva el APK release firmado; no instalar el debug ni desinstalar la app para ejecutar pruebas.
+- El pico medido al guardar cuatro capas 4096 × 4096 fue de 518,19 MiB nativos en un emulador, usando una sonda de snapshot + escritura; la exportación llegó a 325,97 MiB. La sonda no reproduce todo el ciclo real ni el historial, y falta repetirla en la tableta Samsung.
+- La mitigación de snapshots/escritura secuenciales fue propuesta y el usuario no la autorizó; no implementarla sin una nueva aprobación.
 - Falta prueba real de 4096 × 4096 y canvas.maximumBitmapWidth en Samsung.
 - Faltan pruebas específicas de exportación fallida y filas MediaStore huérfanas.
 - Faltan pruebas específicas de doble navegación, recorrido completo de Activity recreada y undo/redo con trazos grandes.

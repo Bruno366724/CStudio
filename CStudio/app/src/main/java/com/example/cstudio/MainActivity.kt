@@ -41,6 +41,8 @@ import com.example.cstudio.brush.BrushSettings
 import com.example.cstudio.brush.Brushes
 import com.example.cstudio.color.RecentColorsRepository
 import com.example.cstudio.drawing.DrawingView
+import com.example.cstudio.drawing.LayerInfo
+import com.example.cstudio.drawing.LayerPixelSnapshot
 import com.example.cstudio.storage.AutoSaveDebouncer
 import com.example.cstudio.storage.ExportFormat
 import com.example.cstudio.storage.ExportOptions
@@ -52,6 +54,7 @@ import com.example.cstudio.storage.StoredProject
 import com.example.cstudio.ui.ColorPickerDialog
 import com.example.cstudio.ui.ExportDialog
 import com.example.cstudio.ui.HomeScreen
+import com.example.cstudio.ui.LayersPanel
 import com.example.cstudio.ui.NewProjectDialog
 import com.example.cstudio.ui.ToolBar
 import com.example.cstudio.ui.theme.CStudioTheme
@@ -70,6 +73,21 @@ private enum class MainScreen {
     EDITOR
 }
 
+private data class ProjectSaveSnapshot(
+    val metadata: ProjectMetadata,
+    val layers: List<LayerPixelSnapshot>,
+    val thumbnail: Bitmap,
+    val changeVersion: Long
+) {
+    val changedBitmaps: Map<String, Bitmap>
+        get() = layers.associate { it.id to it.bitmap }
+
+    fun recycle() {
+        layers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+        if (!thumbnail.isRecycled) thumbnail.recycle()
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private lateinit var drawingView: DrawingView
     private lateinit var projectStorage: ProjectStorage
@@ -84,10 +102,14 @@ class MainActivity : ComponentActivity() {
     private var newProjectDialogVisible by mutableStateOf(false)
     private var exportDialogVisible by mutableStateOf(false)
     private var colorPickerDialogVisible by mutableStateOf(false)
+    private var layersPanelVisible by mutableStateOf(false)
+    private var layerInfos by mutableStateOf<List<LayerInfo>>(emptyList())
+    private var activeLayerIndex by mutableStateOf(0)
     private var eyedropperMode by mutableStateOf(false)
     private var pendingExportOptions: ExportOptions? = null
     private var isBusy = false
     private var dirty = false
+    private var replacingProject = false
     private var changeVersion = 0L
     private val projectSaveMutex = PROCESS_PROJECT_MUTEX
 
@@ -119,6 +141,18 @@ class MainActivity : ComponentActivity() {
                 autoSaveDebouncer.schedule()
             }
         }
+        drawingView.onLayersChanged = {
+            layerInfos = drawingView.layerInfos()
+            activeLayerIndex = drawingView.activeLayerIndex
+            if (projectReady && !replacingProject) {
+                changeVersion++
+                dirty = true
+                autoSaveDebouncer.schedule()
+            }
+        }
+        drawingView.onBlockedDrawing = {
+            Toast.makeText(this, "La capa está oculta.", Toast.LENGTH_SHORT).show()
+        }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -128,6 +162,8 @@ class MainActivity : ComponentActivity() {
                     exportDialogVisible = false
                 } else if (colorPickerDialogVisible) {
                     colorPickerDialogVisible = false
+                } else if (layersPanelVisible) {
+                    layersPanelVisible = false
                 } else if (eyedropperMode) {
                     eyedropperMode = false
                     drawingView.eyedropperEnabled = false
@@ -216,7 +252,8 @@ class MainActivity : ComponentActivity() {
                                     lifecycleScope.launch { navigateHome() }
                                 },
                                 onColorSelectionFinished = onColorSelectionFinished,
-                                onOpenColorPicker = { colorPickerDialogVisible = true }
+                                onOpenColorPicker = { colorPickerDialogVisible = true },
+                                onLayers = { layersPanelVisible = !layersPanelVisible }
                             )
                             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                                 AndroidView(
@@ -248,6 +285,34 @@ class MainActivity : ComponentActivity() {
                                             Text("Cancelar")
                                         }
                                     }
+                                }
+                                if (layersPanelVisible) {
+                                    LayersPanel(
+                                        layers = layerInfos,
+                                        activeLayerIndex = activeLayerIndex,
+                                        onSelectLayer = drawingView::selectLayer,
+                                        onToggleVisibility = drawingView::setLayerVisible,
+                                        onOpacityChange = drawingView::setLayerOpacity,
+                                        onAdd = {
+                                            try {
+                                                if (!drawingView.addLayer()) {
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        "No hay memoria para más capas en este lienzo.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                            } catch (error: OutOfMemoryError) {
+                                                showMemoryError()
+                                            }
+                                        },
+                                        onMove = drawingView::moveLayer,
+                                        onDelete = { drawingView.removeActiveLayer() },
+                                        onDismiss = { layersPanelVisible = false },
+                                        modifier = Modifier
+                                            .align(Alignment.CenterEnd)
+                                            .padding(8.dp)
+                                    )
                                 }
                             }
                         }
@@ -327,32 +392,33 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         if (projectReady && dirty) {
             autoSaveDebouncer.cancel()
-            val metadata = currentProject
-            if (metadata != null) {
-                val saveVersion = changeVersion
-                val snapshot = try {
-                    drawingView.snapshotLayer()
-                } catch (error: OutOfMemoryError) {
-                    showMemoryError()
-                    null
-                }
-                if (snapshot != null) {
+            val snapshot = createSaveSnapshot()
+            if (snapshot != null) {
                     lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                        var writeCompleted = false
+                        var completedMetadata: ProjectMetadata? = null
                         try {
-                            val updatedMetadata = withContext(NonCancellable + Dispatchers.IO) {
-                                try {
-                                    projectSaveMutex.withLock {
-                                        projectStorage.saveProject(metadata, listOf(snapshot))
-                                    }
-                                } finally {
-                                    snapshot.recycle()
-                                }
+                            val updatedMetadata = writeProjectSnapshot(snapshot) {
+                                completedMetadata = it
+                                writeCompleted = true
                             }
                             if (currentProject?.id == updatedMetadata.id) {
                                 currentProject = updatedMetadata
-                                dirty = changeVersion != saveVersion
+                                drawingView.markLayerSnapshotsSaved(snapshot.layers)
+                                dirty = changeVersion != snapshot.changeVersion
                             }
                         } catch (exception: CancellationException) {
+                            if (writeCompleted) {
+                                completedMetadata?.let {
+                                    if (currentProject?.id == it.id) {
+                                        currentProject = it
+                                        drawingView.markLayerSnapshotsSaved(snapshot.layers)
+                                    }
+                                }
+                                dirty = changeVersion != snapshot.changeVersion
+                            } else {
+                                dirty = true
+                            }
                             throw exception
                         } catch (exception: IOException) {
                             dirty = true
@@ -364,9 +430,10 @@ class MainActivity : ComponentActivity() {
                             dirty = true
                             Log.e(TAG, "Memoria insuficiente para guardar el lienzo.", error)
                             showMemoryError()
+                        } finally {
+                            snapshot.recycle()
                         }
                     }
-                }
             }
         }
         super.onPause()
@@ -545,7 +612,13 @@ class MainActivity : ComponentActivity() {
             autoSaveDebouncer.cancel()
             try {
                 val emptyLayer = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
-                drawingView.replaceLayer(emptyLayer, takeOwnership = true)
+                replacingProject = true
+                projectReady = false
+                try {
+                    drawingView.replaceLayer(emptyLayer, takeOwnership = true)
+                } finally {
+                    replacingProject = false
+                }
             } catch (error: OutOfMemoryError) {
                 showMemoryError()
             }
@@ -563,11 +636,15 @@ class MainActivity : ComponentActivity() {
 
     private fun displayProject(project: StoredProject) {
         var ownershipTransferred = false
+        val previousProjectReady = projectReady
+        replacingProject = true
+        projectReady = false
         try {
-            if (project.layers.size != 1) {
-                throw IOException("Este proyecto contiene capas todavía no compatibles.")
-            }
-            drawingView.replaceLayer(project.layers.single(), takeOwnership = true)
+            drawingView.replaceLayers(
+                project.layers,
+                project.metadata.layers,
+                takeOwnership = true
+            )
             ownershipTransferred = true
             currentProject = project.metadata
             projectReady = true
@@ -575,41 +652,80 @@ class MainActivity : ComponentActivity() {
             restoredProjectId = project.metadata.id
             currentScreen = MainScreen.EDITOR
             homeProjects = emptyList()
+            layersPanelVisible = false
+            layerInfos = drawingView.layerInfos()
+            activeLayerIndex = drawingView.activeLayerIndex
             autoSaveDebouncer.cancel()
+        } catch (exception: Exception) {
+            projectReady = previousProjectReady
+            throw exception
+        } catch (error: OutOfMemoryError) {
+            projectReady = previousProjectReady
+            throw error
         } finally {
+            replacingProject = false
             if (!ownershipTransferred) project.layers.forEach { it.recycle() }
         }
     }
 
+    private fun createSaveSnapshot(): ProjectSaveSnapshot? {
+        val metadata = currentProject ?: return null
+        val snapshotVersion = changeVersion
+        var layers: List<LayerPixelSnapshot> = emptyList()
+        var thumbnail: Bitmap? = null
+        try {
+            val savedMetadata = metadata.copy(layers = drawingView.layerMetadata())
+            layers = drawingView.snapshotChangedLayers()
+            val composedThumbnail = drawingView.snapshotThumbnail()
+            thumbnail = composedThumbnail
+            return ProjectSaveSnapshot(savedMetadata, layers, composedThumbnail, snapshotVersion)
+        } catch (error: OutOfMemoryError) {
+            layers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+            thumbnail?.recycle()
+            showMemoryError()
+            return null
+        } catch (exception: Exception) {
+            layers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+            thumbnail?.recycle()
+            showStorageError(
+                "No se pudo preparar el guardado del proyecto.",
+                IOException(exception.message, exception)
+            )
+            return null
+        }
+    }
+
+    private suspend fun writeProjectSnapshot(
+        snapshot: ProjectSaveSnapshot,
+        onCompleted: (ProjectMetadata) -> Unit
+    ): ProjectMetadata = withContext(NonCancellable + Dispatchers.IO) {
+        projectSaveMutex.withLock {
+            projectStorage.saveProject(
+                snapshot.metadata,
+                snapshot.changedBitmaps,
+                snapshot.thumbnail
+            )
+        }.also(onCompleted)
+    }
+
     private suspend fun saveCurrentProject(): Boolean {
-        val metadata = currentProject ?: return true
+        if (currentProject == null) return true
         if (!projectReady) return true
         if (!dirty) return true
 
-        val snapshot = try {
-            drawingView.snapshotLayer()
-        } catch (error: OutOfMemoryError) {
-            showMemoryError()
-            return false
-        }
-        val saveVersion = changeVersion
+        val snapshot = createSaveSnapshot() ?: return false
         var writeCompleted = false
         var completedMetadata: ProjectMetadata? = null
         try {
-            val updatedMetadata = withContext(NonCancellable + Dispatchers.IO) {
-                try {
-                    projectSaveMutex.withLock {
-                        projectStorage.saveProject(metadata, listOf(snapshot))
-                    }.also {
-                        completedMetadata = it
-                        writeCompleted = true
-                    }
-                } finally {
-                    snapshot.recycle()
-                }
+            val updatedMetadata = writeProjectSnapshot(snapshot) {
+                completedMetadata = it
+                writeCompleted = true
             }
-            if (currentProject?.id == updatedMetadata.id) currentProject = updatedMetadata
-            dirty = changeVersion != saveVersion
+            if (currentProject?.id == updatedMetadata.id) {
+                currentProject = updatedMetadata
+                drawingView.markLayerSnapshotsSaved(snapshot.layers)
+                dirty = changeVersion != snapshot.changeVersion
+            }
             return true
         } catch (exception: IOException) {
             dirty = true
@@ -618,9 +734,12 @@ class MainActivity : ComponentActivity() {
         } catch (exception: CancellationException) {
             if (writeCompleted) {
                 completedMetadata?.let {
-                    if (currentProject?.id == it.id) currentProject = it
+                    if (currentProject?.id == it.id) {
+                        currentProject = it
+                        drawingView.markLayerSnapshotsSaved(snapshot.layers)
+                    }
                 }
-                dirty = changeVersion != saveVersion
+                dirty = changeVersion != snapshot.changeVersion
             } else {
                 dirty = true
             }
@@ -634,6 +753,8 @@ class MainActivity : ComponentActivity() {
             dirty = true
             showMemoryError()
             return false
+        } finally {
+            snapshot.recycle()
         }
     }
 
@@ -644,7 +765,7 @@ class MainActivity : ComponentActivity() {
         }
         val projectName = currentProject?.name ?: "Sin título"
         val snapshot = try {
-            drawingView.snapshotLayer()
+            drawingView.snapshotComposite()
         } catch (error: OutOfMemoryError) {
             showMemoryError()
             return

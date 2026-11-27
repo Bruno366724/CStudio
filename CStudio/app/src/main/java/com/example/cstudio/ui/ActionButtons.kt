@@ -24,7 +24,8 @@ fun ActionButtons(
     onResetViewport: () -> Unit,
     onClear: () -> Unit,
     onExport: () -> Unit,
-    onHome: () -> Unit
+    onHome: () -> Unit,
+    onLayers: () -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -40,6 +41,7 @@ fun ActionButtons(
         Button(onClick = onRedo) { Text("Rehacer") }
         Button(onClick = onResetViewport) { Text("Ajustar") }
         Button(onClick = onClear) { Text("Limpiar") }
+        Button(onClick = onLayers) { Text("Capas") }
         Button(onClick = onExport) { Text("Exportar") }
         Button(onClick = onHome) { Text("Inicio") }
     }

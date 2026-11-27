@@ -5,6 +5,7 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import com.example.cstudio.CanvasDimensions
+import com.example.cstudio.drawing.LayerStack
 import java.io.IOException
 
 data class ProjectLayerMetadata(
@@ -101,12 +102,15 @@ data class ProjectMetadata(
         }
     }
 
-    private fun validate() {
+    internal fun validate() {
         require(id.isNotBlank())
         require(name.isNotBlank())
         require(createdAt > 0L && modifiedAt >= createdAt)
         require(CanvasDimensions.isValid(canvasWidth, canvasHeight))
         require(layers.isNotEmpty())
+        require(LayerStack.canFit(canvasWidth, canvasHeight, layers.size))
+        require(layers.map(ProjectLayerMetadata::id).toSet().size == layers.size)
+        require(layers.map(ProjectLayerMetadata::archivo).toSet().size == layers.size)
         layers.forEach { layer ->
             require(layer.id.isNotBlank())
             require(layer.archivo.isNotBlank())

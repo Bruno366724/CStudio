@@ -23,7 +23,8 @@ fun ToolBar(
     onExport: () -> Unit,
     onHome: () -> Unit,
     onColorSelectionFinished: (Int) -> Unit,
-    onOpenColorPicker: () -> Unit
+    onOpenColorPicker: () -> Unit,
+    onLayers: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
         ColorPalette(
@@ -45,7 +46,8 @@ fun ToolBar(
             onResetViewport = onResetViewport,
             onClear = onClear,
             onExport = onExport,
-            onHome = onHome
+            onHome = onHome,
+            onLayers = onLayers
         )
         BrushOptions(
             sizeDp = settings.sizeDp,

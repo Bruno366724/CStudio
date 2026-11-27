@@ -9,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.util.Log
 import com.example.cstudio.CanvasDimensions
+import com.example.cstudio.drawing.LayerStack
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
@@ -19,6 +20,7 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.UUID
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 data class StoredProject(val metadata: ProjectMetadata, val layers: List<Bitmap>)
 
@@ -78,27 +80,53 @@ class ProjectStorage(private val filesDir: File) {
     }
 
     fun saveProject(metadata: ProjectMetadata, layers: List<Bitmap>): ProjectMetadata {
+        validateMetadata(metadata)
         if (layers.size != metadata.layers.size || layers.isEmpty()) {
             throw IOException("La cantidad de capas no coincide con los metadatos.")
+        }
+        val changedLayers = metadata.layers.zip(layers).associate { (layer, bitmap) ->
+            layer.id to bitmap
+        }
+        val thumbnail = createThumbnail(metadata, layers)
+        return try {
+            saveProject(metadata, changedLayers, thumbnail)
+        } finally {
+            thumbnail.recycle()
+        }
+    }
+
+    fun saveProject(
+        metadata: ProjectMetadata,
+        changedLayers: Map<String, Bitmap>,
+        thumbnail: Bitmap
+    ): ProjectMetadata {
+        validateMetadata(metadata)
+        if (metadata.layers.isEmpty() || metadata.layers.size > LayerStack.MAX_LAYERS) {
+            throw IOException("La cantidad de capas del proyecto no es válida.")
+        }
+        if (thumbnail.width != THUMBNAIL_SIZE || thumbnail.height != THUMBNAIL_SIZE) {
+            throw IOException("La miniatura tiene dimensiones incorrectas.")
+        }
+        val metadataIds = metadata.layers.map(ProjectLayerMetadata::id).toSet()
+        if (changedLayers.keys.any { it !in metadataIds }) {
+            throw IOException("Se intentó guardar una capa ajena al proyecto.")
         }
         val directory = projectDirectory(metadata.id)
         ensureDirectory(directory)
 
-        metadata.layers.zip(layers).forEach { (layerMetadata, bitmap) ->
-            if (bitmap.width != metadata.canvasWidth || bitmap.height != metadata.canvasHeight) {
-                throw IOException("El tamaño de la capa no coincide con el lienzo.")
+        metadata.layers.forEach { layerMetadata ->
+            val target = File(directory, safeFileName(layerMetadata.archivo))
+            val bitmap = changedLayers[layerMetadata.id]
+            if (bitmap != null) {
+                if (bitmap.width != metadata.canvasWidth || bitmap.height != metadata.canvasHeight) {
+                    throw IOException("El tamaño de la capa no coincide con el lienzo.")
+                }
+                writeBitmapAtomically(target, bitmap)
+            } else if (!target.isFile) {
+                throw IOException("Falta el archivo de una capa sin cambios.")
             }
-            writeBitmapAtomically(
-                File(directory, safeFileName(layerMetadata.archivo)),
-                bitmap
-            )
         }
-        val thumbnail = createThumbnail(layers.first())
-        try {
-            writeBitmapAtomically(File(directory, THUMBNAIL_FILE), thumbnail)
-        } finally {
-            thumbnail.recycle()
-        }
+        writeBitmapAtomically(File(directory, THUMBNAIL_FILE), thumbnail)
 
         val updatedMetadata = metadata.copy(
             modifiedAt = maxOf(System.currentTimeMillis(), metadata.modifiedAt, metadata.createdAt)
@@ -107,6 +135,15 @@ class ProjectStorage(private val filesDir: File) {
             File(directory, METADATA_FILE),
             updatedMetadata.toJson().toString(2)
         )
+        val referencedFiles = metadata.layers.map { safeFileName(it.archivo) }.toSet()
+        directory.listFiles()
+            ?.filter { it.isFile && it.name.startsWith("layer_") && it.name.endsWith(".png") }
+            ?.filter { it.name !in referencedFiles }
+            ?.forEach { orphan ->
+                if (!orphan.delete()) {
+                    Log.w(TAG, "No se pudo borrar la capa huérfana ${orphan.name}.")
+                }
+            }
         directory.setLastModified(updatedMetadata.modifiedAt)
         return updatedMetadata
     }
@@ -273,23 +310,37 @@ class ProjectStorage(private val filesDir: File) {
         return fileName
     }
 
-    private fun createThumbnail(layer: Bitmap): Bitmap {
+    private fun createThumbnail(metadata: ProjectMetadata, layers: List<Bitmap>): Bitmap {
         val thumbnail = Bitmap.createBitmap(THUMBNAIL_SIZE, THUMBNAIL_SIZE, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(thumbnail)
-        canvas.drawColor(Color.WHITE)
-        val scale = min(
-            THUMBNAIL_SIZE.toFloat() / layer.width,
-            THUMBNAIL_SIZE.toFloat() / layer.height
-        )
-        val width = layer.width * scale
-        val height = layer.height * scale
-        val destination = RectF(
-            (THUMBNAIL_SIZE - width) / 2f,
-            (THUMBNAIL_SIZE - height) / 2f,
-            (THUMBNAIL_SIZE + width) / 2f,
-            (THUMBNAIL_SIZE + height) / 2f
-        )
-        canvas.drawBitmap(layer, null, destination, Paint(Paint.FILTER_BITMAP_FLAG))
+        try {
+            val canvas = Canvas(thumbnail)
+            canvas.drawColor(Color.WHITE)
+            val scale = min(
+                THUMBNAIL_SIZE.toFloat() / metadata.canvasWidth,
+                THUMBNAIL_SIZE.toFloat() / metadata.canvasHeight
+            )
+            val width = metadata.canvasWidth * scale
+            val height = metadata.canvasHeight * scale
+            val destination = RectF(
+                (THUMBNAIL_SIZE - width) / 2f,
+                (THUMBNAIL_SIZE - height) / 2f,
+                (THUMBNAIL_SIZE + width) / 2f,
+                (THUMBNAIL_SIZE + height) / 2f
+            )
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+            metadata.layers.zip(layers).forEach { (info, layer) ->
+                if (info.visible) {
+                    paint.alpha = (info.opacidad * 255f).roundToInt().coerceIn(0, 255)
+                    canvas.drawBitmap(layer, null, destination, paint)
+                }
+            }
+        } catch (error: OutOfMemoryError) {
+            thumbnail.recycle()
+            throw error
+        } catch (exception: Exception) {
+            thumbnail.recycle()
+            throw exception
+        }
         return thumbnail
     }
 
@@ -366,14 +417,18 @@ class ProjectStorage(private val filesDir: File) {
             }
         }
 
-        val layerFile = File(directory, "layer_0.png")
-        if (!layerFile.isFile) throw IOException("No hay metadatos utilizables ni una capa recuperable.")
+        val layerFile = directory.listFiles()
+            ?.filter { it.isFile && it.name.startsWith("layer_") && it.name.endsWith(".png") }
+            ?.sortedBy(File::getName)
+            ?.firstOrNull()
+            ?: throw IOException("No hay metadatos utilizables ni una capa recuperable.")
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(layerFile.absolutePath, bounds)
         if (bounds.outWidth !in 64..4096 || bounds.outHeight !in 64..4096) {
             throw IOException("La capa recuperada tiene dimensiones inválidas.")
         }
         val now = System.currentTimeMillis()
+        val layerSuffix = layerFile.name.removePrefix("layer_").removeSuffix(".png")
         val recovered = ProjectMetadata(
             id = directory.name,
             name = "Recuperado",
@@ -382,7 +437,7 @@ class ProjectStorage(private val filesDir: File) {
             canvasWidth = bounds.outWidth,
             canvasHeight = bounds.outHeight,
             layers = listOf(
-                ProjectLayerMetadata("layer-0", "layer_0.png", true, 1f)
+                ProjectLayerMetadata("layer-$layerSuffix", layerFile.name, true, 1f)
             )
         )
         writeTextAtomically(metadataFile, recovered.toJson().toString(2))
@@ -398,14 +453,16 @@ class ProjectStorage(private val filesDir: File) {
                 }
                 val metadata = File(entry, METADATA_FILE)
                 val backup = File(entry, "$METADATA_FILE.bak")
-                val layer = File(entry, "layer_0.png")
+                val hasLayer = entry.listFiles()?.any {
+                    it.isFile && it.name.startsWith("layer_") && it.name.endsWith(".png")
+                } == true
                 val hasUnknownVersion = try {
                     val source = if (metadata.isFile) metadata else if (backup.isFile) backup else null
                     source?.let { JSONObject(it.readText()).optInt("version", 0) }?.let { it > 2 } == true
                 } catch (_: Exception) {
                     false
                 }
-                if (!hasUnknownVersion && !metadata.isFile && !backup.isFile && !layer.isFile) {
+                if (!hasUnknownVersion && !metadata.isFile && !backup.isFile && !hasLayer) {
                     entry.deleteRecursively()
                 }
             } else if (entry.name.endsWith(".tmp")) {
@@ -417,6 +474,14 @@ class ProjectStorage(private val filesDir: File) {
     private fun ensureDirectory(directory: File) {
         if (!directory.isDirectory && !directory.mkdirs()) {
             throw IOException("No se pudo crear el directorio del proyecto.")
+        }
+    }
+
+    private fun validateMetadata(metadata: ProjectMetadata) {
+        try {
+            metadata.validate()
+        } catch (exception: IllegalArgumentException) {
+            throw IOException("Los metadatos del proyecto no son válidos.", exception)
         }
     }
 

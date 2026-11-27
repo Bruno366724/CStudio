@@ -10,6 +10,7 @@ import java.util.ArrayDeque
 
 internal class History(private val bitmap: Bitmap) {
     private data class HistoryEntry(
+        val target: Bitmap,
         val bounds: Rect,
         val before: Bitmap,
         var after: Bitmap?,
@@ -24,10 +25,11 @@ internal class History(private val bitmap: Bitmap) {
         }
     }
 
-    private val canvas = Canvas(bitmap)
     private val undoStack = ArrayDeque<HistoryEntry>()
     private val redoStack = ArrayDeque<HistoryEntry>()
     private var historyBytes = 0L
+    internal var lastChangedTarget: Bitmap? = null
+        private set
 
     internal val trackedBytes: Long
         get() = historyBytes
@@ -41,47 +43,54 @@ internal class History(private val bitmap: Bitmap) {
     val canRedo: Boolean
         get() = redoStack.isNotEmpty()
 
-    fun capture(bounds: Rect): Bitmap {
-        return Bitmap.createBitmap(bitmap, bounds.left, bounds.top, bounds.width(), bounds.height())
+    fun capture(bounds: Rect, target: Bitmap = bitmap): Bitmap {
+        return Bitmap.createBitmap(target, bounds.left, bounds.top, bounds.width(), bounds.height())
     }
 
-    fun commit(bounds: Rect, before: Bitmap) {
-        pushUndo(HistoryEntry(Rect(bounds), before, null))
+    fun commit(bounds: Rect, before: Bitmap, target: Bitmap = bitmap) {
+        pushUndo(HistoryEntry(target, Rect(bounds), before, null))
     }
 
-    fun clear() {
-        val bounds = Rect(0, 0, bitmap.width, bitmap.height)
-        val before = capture(bounds)
-        bitmap.eraseColor(Color.TRANSPARENT)
-        pushUndo(HistoryEntry(bounds, before, null, clearsBounds = true))
+    fun clear(target: Bitmap = bitmap) {
+        val bounds = Rect(0, 0, target.width, target.height)
+        val before = capture(bounds, target)
+        target.eraseColor(Color.TRANSPARENT)
+        pushUndo(HistoryEntry(target, bounds, before, null, clearsBounds = true))
     }
 
     fun undo(): Boolean {
         val entry = undoStack.peekLast() ?: return false
         if (entry.after == null) {
             val after = try {
-                capture(entry.bounds)
+                capture(entry.bounds, entry.target)
             } catch (error: OutOfMemoryError) {
                 return false
             }
             entry.after = after
             historyBytes += after.byteCount.toLong()
         }
-        restoreRegion(entry.bounds, entry.before)
+        restoreRegion(entry.target, entry.bounds, entry.before)
         undoStack.removeLast()
         redoStack.addLast(entry)
+        lastChangedTarget = entry.target
         return true
     }
 
     fun redo(): Boolean {
         val entry = redoStack.pollLast() ?: return false
         if (entry.clearsBounds) {
-            clearRegion(entry.bounds)
+            clearRegion(entry.target, entry.bounds)
         } else {
-            restoreRegion(entry.bounds, checkNotNull(entry.after))
+            restoreRegion(entry.target, entry.bounds, checkNotNull(entry.after))
         }
         undoStack.addLast(entry)
+        lastChangedTarget = entry.target
         return true
+    }
+
+    fun removeEntriesFor(target: Bitmap) {
+        removeEntries(undoStack, target)
+        removeEntries(redoStack, target)
     }
 
     fun reset() {
@@ -90,9 +99,11 @@ internal class History(private val bitmap: Bitmap) {
         undoStack.clear()
         redoStack.clear()
         historyBytes = 0L
+        lastChangedTarget = null
     }
 
-    private fun restoreRegion(bounds: Rect, patch: Bitmap) {
+    private fun restoreRegion(target: Bitmap, bounds: Rect, patch: Bitmap) {
+        val canvas = Canvas(target)
         val save = canvas.save()
         canvas.clipRect(bounds)
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
@@ -100,7 +111,8 @@ internal class History(private val bitmap: Bitmap) {
         canvas.restoreToCount(save)
     }
 
-    private fun clearRegion(bounds: Rect) {
+    private fun clearRegion(target: Bitmap, bounds: Rect) {
+        val canvas = Canvas(target)
         val save = canvas.save()
         canvas.clipRect(bounds)
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
@@ -135,6 +147,18 @@ internal class History(private val bitmap: Bitmap) {
             it.recycle()
         }
         redoStack.clear()
+    }
+
+    private fun removeEntries(stack: ArrayDeque<HistoryEntry>, target: Bitmap) {
+        val iterator = stack.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.target === target) {
+                historyBytes -= entry.byteSize
+                entry.recycle()
+                iterator.remove()
+            }
+        }
     }
 
     private companion object {

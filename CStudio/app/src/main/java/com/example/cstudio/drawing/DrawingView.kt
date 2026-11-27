@@ -14,16 +14,18 @@ import com.example.cstudio.CanvasDimensions
 import com.example.cstudio.brush.Brush
 import com.example.cstudio.brush.BrushSettings
 import com.example.cstudio.brush.Brushes
+import com.example.cstudio.storage.ProjectLayerMetadata
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Vista clásica del lienzo; coordina entrada, viewport, renderizado e historial.
  *
  * Cómo funciona ahora:
- *  - El dibujo vive en un Bitmap transparente de tamaño fijo (la futura "capa").
+ *  - Cada capa vive en un Bitmap transparente de tamaño fijo.
  *  - El trazo EN CURSO no se pinta en ese Bitmap: se guarda como lista de puntos
  *    (x, y, ancho) y se redibuja en cada onDraw directamente sobre el canvas de la
  *    pantalla (acelerado por GPU), usando las coordenadas del lienzo.
@@ -46,15 +48,26 @@ class DrawingView @JvmOverloads constructor(
     // Los ajustes se leen al iniciar cada trazo.
     var brushSettings = BrushSettings(Color.BLACK, 12f, 1f, Brushes.PENCIL)
     var onStrokeCommitted: (() -> Unit)? = null
+    var onLayersChanged: (() -> Unit)? = null
+    var onBlockedDrawing: (() -> Unit)? = null
 
     private var currentCanvasWidth = CanvasDimensions.DEFAULT_WIDTH
     private var currentCanvasHeight = CanvasDimensions.DEFAULT_HEIGHT
-    private var layerBitmap = Bitmap.createBitmap(
+    private var layerStack = LayerStack(
         currentCanvasWidth,
         currentCanvasHeight,
-        Bitmap.Config.ARGB_8888
+        listOf(
+            DrawingLayer(
+                "layer-0",
+                "layer_0.png",
+                Bitmap.createBitmap(
+                    currentCanvasWidth,
+                    currentCanvasHeight,
+                    Bitmap.Config.ARGB_8888
+                )
+            )
+        )
     )
-    private var layerCanvas = Canvas(layerBitmap)
     private var viewport = Viewport(currentCanvasWidth, currentCanvasHeight)
     private var strokeRenderer = StrokeRenderer(currentCanvasWidth, currentCanvasHeight)
 
@@ -84,7 +97,7 @@ class DrawingView @JvmOverloads constructor(
     private var strokeStartedWithFinger = false
     private var isTransforming = false
 
-    private var history = History(layerBitmap)
+    private var history = History(layerStack.activeLayer.bitmap)
 
     var onMemoryError: (() -> Unit)? = null
     var onEyedropperResult: ((Int?) -> Unit)? = null
@@ -110,6 +123,12 @@ class DrawingView @JvmOverloads constructor(
     val canvasHeight: Int
         get() = currentCanvasHeight
 
+    val layerCount: Int
+        get() = layerStack.layers.size
+
+    val activeLayerIndex: Int
+        get() = layerStack.activeIndex
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w <= 0 || h <= 0) return
@@ -129,27 +148,59 @@ class DrawingView @JvmOverloads constructor(
         canvas.clipRect(0f, 0f, currentCanvasWidth.toFloat(), currentCanvasHeight.toFloat())
         canvas.drawRect(0f, 0f, currentCanvasWidth.toFloat(), currentCanvasHeight.toFloat(), paperPaint)
 
-        // Sin trazo en curso: solo se muestra el dibujo terminado.
-        if (pointCount == 0) {
-            canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
-            canvas.restore()
-            return
+        layerStack.layers.forEachIndexed { index, layer ->
+            if (!layer.visible) return@forEachIndexed
+            if (pointCount > 0 && index == layerStack.activeIndex) {
+                drawActiveLayerPreview(canvas, layer)
+            } else {
+                drawLayer(canvas, layer)
+            }
         }
+        canvas.restore()
+    }
 
-        strokeRenderer.preparePaint(strokeColor, strokeBrush.isEraser)
+    private fun drawLayer(canvas: Canvas, layer: DrawingLayer) {
+        bitmapPaint.alpha = (layer.opacity * 255f).roundToInt().coerceIn(0, 255)
+        canvas.drawBitmap(layer.bitmap, 0f, 0f, bitmapPaint)
+        bitmapPaint.alpha = 255
+    }
+
+    private fun drawActiveLayerPreview(canvas: Canvas, layer: DrawingLayer) {
+        val bounds = strokeBounds()
+        val layerAlpha = (layer.opacity * 255f).roundToInt().coerceIn(0, 255)
+        val outside = canvas.save()
+        canvas.clipOutRect(bounds)
+        bitmapPaint.alpha = layerAlpha
+        canvas.drawBitmap(layer.bitmap, 0f, 0f, bitmapPaint)
+        bitmapPaint.alpha = 255
+        canvas.restoreToCount(outside)
+
+        val previewClip = canvas.save()
+        canvas.clipRect(bounds)
         if (strokeBrush.isEraser) {
-            val bounds = strokeBounds()
-            canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
-            val clipSave = canvas.save()
-            canvas.clipRect(bounds)
-            canvas.drawRect(bounds, paperPaint)
-            val save = strokeRenderer.saveLayer(canvas, bounds)
-            canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
+            val opacitySave = canvas.saveLayerAlpha(
+                bounds.left.toFloat(),
+                bounds.top.toFloat(),
+                bounds.right.toFloat(),
+                bounds.bottom.toFloat(),
+                layerAlpha
+            )
+            val groupSave = strokeRenderer.saveLayer(canvas, bounds)
+            canvas.drawBitmap(layer.bitmap, 0f, 0f, bitmapPaint)
+            strokeRenderer.preparePaint(strokeColor, true)
             strokeRenderer.replayStroke(canvas, pointsX, pointsY, pointsW, pointCount)
-            canvas.restoreToCount(save)
-            canvas.restoreToCount(clipSave)
-        } else {
-            canvas.drawBitmap(layerBitmap, 0f, 0f, bitmapPaint)
+            canvas.restoreToCount(groupSave)
+            canvas.restoreToCount(opacitySave)
+        } else if (layerAlpha < 255) {
+            val groupSave = canvas.saveLayerAlpha(
+                bounds.left.toFloat(),
+                bounds.top.toFloat(),
+                bounds.right.toFloat(),
+                bounds.bottom.toFloat(),
+                layerAlpha
+            )
+            canvas.drawBitmap(layer.bitmap, 0f, 0f, bitmapPaint)
+            strokeRenderer.preparePaint(strokeColor, false)
             strokeRenderer.drawBrushStroke(
                 canvas,
                 combinedStrokeOpacity(),
@@ -157,10 +208,23 @@ class DrawingView @JvmOverloads constructor(
                 pointsY,
                 pointsW,
                 pointCount,
-                strokeBounds()
+                bounds
+            )
+            canvas.restoreToCount(groupSave)
+        } else {
+            canvas.drawBitmap(layer.bitmap, 0f, 0f, bitmapPaint)
+            strokeRenderer.preparePaint(strokeColor, false)
+            strokeRenderer.drawBrushStroke(
+                canvas,
+                combinedStrokeOpacity(),
+                pointsX,
+                pointsY,
+                pointsW,
+                pointCount,
+                bounds
             )
         }
-        canvas.restore()
+        canvas.restoreToCount(previewClip)
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -193,6 +257,10 @@ class DrawingView @JvmOverloads constructor(
                 if (!viewport.isInsideCanvas(point[0], point[1])) {
                     isDrawing = false
                     pointCount = 0
+                    return true
+                }
+                if (!layerStack.activeLayer.visible) {
+                    onBlockedDrawing?.invoke()
                     return true
                 }
                 activePointerId = event.getPointerId(0)
@@ -282,6 +350,10 @@ class DrawingView @JvmOverloads constructor(
                         if (strokeStartedWithFinger || isTransforming) cancelStroke()
                         val point = viewport.mapToCanvas(event.getX(actionIndex), event.getY(actionIndex))
                         if (viewport.isInsideCanvas(point[0], point[1])) {
+                            if (!layerStack.activeLayer.visible) {
+                                onBlockedDrawing?.invoke()
+                                return true
+                            }
                             activePointerId = event.getPointerId(actionIndex)
                             startStroke(point[0], point[1], event.getPressure(actionIndex),
                                 true, false)
@@ -332,12 +404,14 @@ class DrawingView @JvmOverloads constructor(
     /** Borra todo el dibujo. */
     fun clear() {
         cancelStroke()
+        val layer = layerStack.activeLayer
         try {
-            history.clear()
+            history.clear(layer.bitmap)
         } catch (error: OutOfMemoryError) {
             onMemoryError?.invoke()
             return
         }
+        layer.pixelVersion++
         isDrawing = false
         pointCount = 0
         invalidate()
@@ -349,6 +423,9 @@ class DrawingView @JvmOverloads constructor(
         if (!history.canUndo) return
         try {
             if (history.undo()) {
+                layerStack.layers.firstOrNull {
+                    it.bitmap === history.lastChangedTarget
+                }?.let { it.pixelVersion++ }
                 invalidate()
                 onStrokeCommitted?.invoke()
             } else {
@@ -362,45 +439,244 @@ class DrawingView @JvmOverloads constructor(
     fun redo() {
         cancelStroke()
         if (history.redo()) {
+            layerStack.layers.firstOrNull {
+                it.bitmap === history.lastChangedTarget
+            }?.let { it.pixelVersion++ }
             invalidate()
             onStrokeCommitted?.invoke()
         }
     }
 
     fun snapshotLayer(): Bitmap {
-        return layerBitmap.copy(Bitmap.Config.ARGB_8888, true)
+        return layerStack.activeLayer.bitmap.copy(Bitmap.Config.ARGB_8888, true)
             ?: throw IllegalStateException("No se pudo copiar la capa.")
     }
 
-    fun replaceLayer(bitmap: Bitmap, takeOwnership: Boolean = false) {
-        require(CanvasDimensions.isValid(bitmap.width, bitmap.height)) {
-            "El lienzo debe medir entre 64 y 4096 píxeles por lado."
+    internal fun snapshotLayerAt(index: Int): Bitmap {
+        val bitmap = layerStack.layers.getOrNull(index)?.bitmap
+            ?: throw IndexOutOfBoundsException("No existe la capa $index.")
+        return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+            ?: throw IllegalStateException("No se pudo copiar la capa.")
+    }
+
+    fun snapshotComposite(): Bitmap {
+        val composite = Bitmap.createBitmap(
+            currentCanvasWidth,
+            currentCanvasHeight,
+            Bitmap.Config.ARGB_8888
+        )
+        try {
+            val canvas = Canvas(composite)
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+            layerStack.layers.forEach { layer ->
+                if (layer.visible) {
+                    paint.alpha = (layer.opacity * 255f).roundToInt().coerceIn(0, 255)
+                    canvas.drawBitmap(layer.bitmap, 0f, 0f, paint)
+                }
+            }
+            return composite
+        } catch (error: OutOfMemoryError) {
+            composite.recycle()
+            throw error
+        } catch (exception: Exception) {
+            composite.recycle()
+            throw exception
         }
-        val replacement = if (takeOwnership) {
-            bitmap
-        } else {
-            Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888).also {
-                Canvas(it).drawBitmap(bitmap, 0f, 0f, null)
+    }
+
+    fun snapshotThumbnail(): Bitmap {
+        val thumbnail = Bitmap.createBitmap(THUMBNAIL_SIZE, THUMBNAIL_SIZE, Bitmap.Config.ARGB_8888)
+        try {
+            val canvas = Canvas(thumbnail)
+            canvas.drawColor(Color.WHITE)
+            val scale = min(
+                THUMBNAIL_SIZE.toFloat() / currentCanvasWidth,
+                THUMBNAIL_SIZE.toFloat() / currentCanvasHeight
+            )
+            val drawnWidth = currentCanvasWidth * scale
+            val drawnHeight = currentCanvasHeight * scale
+            val left = (THUMBNAIL_SIZE - drawnWidth) / 2f
+            val top = (THUMBNAIL_SIZE - drawnHeight) / 2f
+            val right = left + drawnWidth
+            val bottom = top + drawnHeight
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+            val destination = android.graphics.RectF(left, top, right, bottom)
+            layerStack.layers.forEach { layer ->
+                if (layer.visible) {
+                    paint.alpha = (layer.opacity * 255f).roundToInt().coerceIn(0, 255)
+                    canvas.drawBitmap(layer.bitmap, null, destination, paint)
+                }
+            }
+            return thumbnail
+        } catch (error: OutOfMemoryError) {
+            thumbnail.recycle()
+            throw error
+        } catch (exception: Exception) {
+            thumbnail.recycle()
+            throw exception
+        }
+    }
+
+    internal fun snapshotChangedLayers(): List<LayerPixelSnapshot> {
+        val snapshots = mutableListOf<LayerPixelSnapshot>()
+        try {
+            layerStack.layers.forEach { layer ->
+                if (layer.pixelVersion != layer.savedPixelVersion) {
+                    val bitmap = layer.bitmap.copy(Bitmap.Config.ARGB_8888, true)
+                        ?: throw IllegalStateException("No se pudo copiar la capa.")
+                    snapshots.add(LayerPixelSnapshot(layer.id, layer.pixelVersion, bitmap))
+                }
+            }
+            return snapshots
+        } catch (error: OutOfMemoryError) {
+            snapshots.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+            throw error
+        } catch (exception: Exception) {
+            snapshots.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+            throw exception
+        }
+    }
+
+    internal fun markLayerSnapshotsSaved(snapshots: List<LayerPixelSnapshot>) {
+        snapshots.forEach { snapshot ->
+            layerStack.layers.firstOrNull { it.id == snapshot.id }?.let { layer ->
+                if (layer.pixelVersion == snapshot.version) {
+                    layer.savedPixelVersion = snapshot.version
+                }
             }
         }
-        val replacementCanvas = Canvas(replacement)
-        val replacementViewport = Viewport(replacement.width, replacement.height)
-        val replacementRenderer = StrokeRenderer(replacement.width, replacement.height)
-        val replacementHistory = History(replacement)
-        val previousBitmap = layerBitmap
+    }
 
+    fun layerInfos(): List<LayerInfo> = layerStack.layers.map {
+        LayerInfo(it.id, it.visible, it.opacity)
+    }
+
+    fun layerMetadata(): List<ProjectLayerMetadata> = layerStack.layers.map(DrawingLayer::metadata)
+
+    fun addLayer(): Boolean {
+        cancelStroke()
+        if (!layerStack.addLayer()) return false
+        invalidate()
+        onLayersChanged?.invoke()
+        return true
+    }
+
+    fun removeActiveLayer(): Boolean {
+        if (layerStack.layers.size <= 1) return false
+        cancelStroke()
+        val removed = layerStack.activeLayer
+        history.removeEntriesFor(removed.bitmap)
+        layerStack.remove(layerStack.activeIndex) ?: return false
+        removed.bitmap.recycle()
+        invalidate()
+        onLayersChanged?.invoke()
+        return true
+    }
+
+    fun moveLayer(index: Int, delta: Int): Boolean {
+        cancelStroke()
+        if (!layerStack.move(index, delta)) return false
+        invalidate()
+        onLayersChanged?.invoke()
+        return true
+    }
+
+    fun selectLayer(index: Int) {
+        if (layerStack.select(index)) {
+            cancelStroke()
+            invalidate()
+            onLayersChanged?.invoke()
+        }
+    }
+
+    fun setLayerVisible(index: Int, visible: Boolean) {
+        if (layerStack.setVisible(index, visible)) {
+            if (index == layerStack.activeIndex && !visible) cancelStroke()
+            invalidate()
+            onLayersChanged?.invoke()
+        }
+    }
+
+    fun setLayerOpacity(index: Int, opacity: Float) {
+        if (layerStack.setOpacity(index, opacity)) {
+            invalidate()
+            onLayersChanged?.invoke()
+        }
+    }
+
+    fun replaceLayer(bitmap: Bitmap, takeOwnership: Boolean = false) {
+        replaceLayers(
+            listOf(bitmap),
+            listOf(ProjectLayerMetadata("layer-0", "layer_0.png", true, 1f)),
+            takeOwnership
+        )
+    }
+
+    fun replaceLayers(
+        bitmaps: List<Bitmap>,
+        metadata: List<ProjectLayerMetadata>,
+        takeOwnership: Boolean = false
+    ) {
+        require(bitmaps.isNotEmpty() && bitmaps.size == metadata.size)
+        val width = bitmaps.first().width
+        val height = bitmaps.first().height
+        require(CanvasDimensions.isValid(width, height))
+        require(LayerStack.canFit(width, height, bitmaps.size)) {
+            "Las capas superan el límite de memoria del lienzo."
+        }
+        require(bitmaps.all { it.width == width && it.height == height })
+        require(metadata.map(ProjectLayerMetadata::id).toSet().size == metadata.size)
+        require(metadata.map(ProjectLayerMetadata::archivo).toSet().size == metadata.size)
+        require(metadata.all {
+            it.id.isNotBlank() && it.archivo.isNotBlank() &&
+                '/' !in it.archivo && '\\' !in it.archivo &&
+                it.opacidad.isFinite() && it.opacidad in 0f..1f
+        })
+        require(!takeOwnership || bitmaps.all {
+            it.config == Bitmap.Config.ARGB_8888 && it.isMutable
+        })
+
+        val replacements = mutableListOf<DrawingLayer>()
+        try {
+            bitmaps.zip(metadata).forEach { (source, info) ->
+                val bitmap = if (takeOwnership) source else {
+                    source.copy(Bitmap.Config.ARGB_8888, true)
+                        ?: throw IllegalStateException("No se pudo copiar la capa.")
+                }
+                replacements.add(
+                    DrawingLayer(
+                        id = info.id,
+                        fileName = info.archivo,
+                        bitmap = bitmap,
+                        visible = info.visible,
+                        opacity = info.opacidad.coerceIn(0f, 1f)
+                    )
+                )
+            }
+        } catch (error: OutOfMemoryError) {
+            if (!takeOwnership) replacements.forEach { it.bitmap.recycle() }
+            throw error
+        } catch (exception: Exception) {
+            if (!takeOwnership) replacements.forEach { it.bitmap.recycle() }
+            throw exception
+        }
+
+        val newStack = LayerStack(width, height, replacements)
+        val oldBitmaps = layerStack.layers.map { it.bitmap }
         cancelStroke()
         history.reset()
-        layerBitmap = replacement
-        layerCanvas = replacementCanvas
-        currentCanvasWidth = replacement.width
-        currentCanvasHeight = replacement.height
-        viewport = replacementViewport
-        strokeRenderer = replacementRenderer
-        history = replacementHistory
-        if (previousBitmap !== replacement) previousBitmap.recycle()
+        layerStack = newStack
+        currentCanvasWidth = width
+        currentCanvasHeight = height
+        viewport = Viewport(width, height)
+        strokeRenderer = StrokeRenderer(width, height)
+        history = History(layerStack.activeLayer.bitmap)
+        oldBitmaps.forEach { old ->
+            if (replacements.none { it.bitmap === old } && !old.isRecycled) old.recycle()
+        }
         resetViewport()
         invalidate()
+        onLayersChanged?.invoke()
     }
 
     fun resetViewport() {
@@ -485,15 +761,16 @@ class DrawingView @JvmOverloads constructor(
         activePointerId = MotionEvent.INVALID_POINTER_ID
         if (pointCount > 0) {
             val bounds = strokeBounds()
+            val layer = layerStack.activeLayer
             var before: Bitmap? = null
             try {
-                before = history.capture(bounds)
+                before = history.capture(bounds, layer.bitmap)
                 strokeRenderer.preparePaint(strokeColor, strokeBrush.isEraser)
                 if (strokeBrush.isEraser) {
-                    strokeRenderer.replayStroke(layerCanvas, pointsX, pointsY, pointsW, pointCount)
+                    strokeRenderer.replayStroke(layer.canvas, pointsX, pointsY, pointsW, pointCount)
                 } else {
                     strokeRenderer.drawBrushStroke(
-                        layerCanvas,
+                        layer.canvas,
                         combinedStrokeOpacity(),
                         pointsX,
                         pointsY,
@@ -502,8 +779,9 @@ class DrawingView @JvmOverloads constructor(
                         bounds
                     )
                 }
-                history.commit(bounds, checkNotNull(before))
+                history.commit(bounds, checkNotNull(before), layer.bitmap)
                 before = null
+                layer.pixelVersion++
                 onStrokeCommitted?.invoke()
             } catch (error: OutOfMemoryError) {
                 before?.recycle()
@@ -522,18 +800,25 @@ class DrawingView @JvmOverloads constructor(
         val point = viewport.mapToCanvas(x, y)
         if (!viewport.isInsideCanvas(point[0], point[1])) return null
 
-        val pixel = layerBitmap.getPixel(point[0].toInt(), point[1].toInt())
-        val alpha = Color.alpha(pixel)
-        if (alpha == 255) return pixel
-
-        val inverseAlpha = 255 - alpha
-        fun composite(channel: Int): Int =
-            (channel * alpha + 255 * inverseAlpha + 127) / 255
-
+        val xPixel = point[0].toInt()
+        val yPixel = point[1].toInt()
+        var red = 255f
+        var green = 255f
+        var blue = 255f
+        layerStack.layers.forEach { layer ->
+            if (layer.visible) {
+                val pixel = layer.bitmap.getPixel(xPixel, yPixel)
+                val alpha = Color.alpha(pixel) / 255f * layer.opacity
+                val inverseAlpha = 1f - alpha
+                red = Color.red(pixel) * alpha + red * inverseAlpha
+                green = Color.green(pixel) * alpha + green * inverseAlpha
+                blue = Color.blue(pixel) * alpha + blue * inverseAlpha
+            }
+        }
         return Color.rgb(
-            composite(Color.red(pixel)),
-            composite(Color.green(pixel)),
-            composite(Color.blue(pixel))
+            red.roundToInt().coerceIn(0, 255),
+            green.roundToInt().coerceIn(0, 255),
+            blue.roundToInt().coerceIn(0, 255)
         )
     }
 
@@ -552,5 +837,9 @@ class DrawingView @JvmOverloads constructor(
         pointCount = 0
         activePointerId = MotionEvent.INVALID_POINTER_ID
         invalidate()
+    }
+
+    private companion object {
+        const val THUMBNAIL_SIZE = 256
     }
 }

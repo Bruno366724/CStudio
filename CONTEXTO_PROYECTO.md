@@ -145,7 +145,7 @@ Contenido típico:
 
 - `project.json`: metadatos versionados.
 - `project.json.bak`: copia de respaldo del JSON.
-- `layer_0.png`: capa actual.
+- `layer_0.png` y `layer_<uuid>.png`: imágenes de las capas.
 - `thumbnail.png`: miniatura cuadrada de 256 × 256.
 - Archivos temporales `*.tmp` durante escrituras.
 
@@ -153,7 +153,7 @@ Formato JSON:
 
 - Versión 1: un único `canvasSize`.
 - Versión 2: `canvasWidth` y `canvasHeight` separados.
-- El formato JSON y `ProjectStorage` admiten una lista de capas y pueden guardar/cargar esa lista; un proyecto nuevo se inicializa con una. Esto no significa que exista edición multicapa: la UI y `DrawingView` actualmente muestran y modifican una sola capa.
+- El formato JSON v2 mantiene una lista ordenada de capas. El editor permite agregar, seleccionar, borrar, reordenar, ocultar y cambiar la opacidad de hasta 20 capas, sujeto a un presupuesto conjunto de 256 MB para los bitmaps vivos.
 
 `ProjectStorage`:
 
@@ -162,11 +162,12 @@ Formato JSON:
 - Crea una miniatura con proporción contenida y barras blancas.
 - Conserva una copia `.bak` antes de reemplazar `project.json`.
 - Si el JSON falla, intenta usar el respaldo.
-- Si no hay respaldo usable pero existe `layer_0.png`, reconstruye metadatos mínimos con nombre "Recuperado".
+- Si no hay respaldo usable pero existe algún `layer_*.png`, reconstruye metadatos mínimos con nombre "Recuperado".
 - Conserva proyectos con versión mayor que 2 sin modificarlos.
 - Limpia temporales y carpetas incompletas al iniciar.
+- Guarda solo las capas con píxeles modificados, escribe primero las imágenes y metadatos atómicos y elimina archivos de capas huérfanos después.
 
-La bandera `dirty` evita reescribir el proyecto si no hubo cambios. Se activa al confirmar trazos, deshacer, rehacer o limpiar. Solo se desactiva después de un guardado exitoso.
+La bandera `dirty` evita reescribir el proyecto si no hubo cambios. Se activa al confirmar trazos, deshacer, rehacer, limpiar o cambiar metadatos de capas. Solo se desactiva después de un guardado exitoso.
 
 ## Funciones planificadas (por prioridad)
 Para la entrega del 2 de diciembre el objetivo es completar el Bloque 1; el Bloque 2 solo si sobra tiempo. Todo lo demás queda para versiones posteriores. Marcá con [x] lo que ya esté hecho.
@@ -178,7 +179,7 @@ Antes de implementar una función que afecte la arquitectura (capas, zoom, anima
 - [x] Zoom y pan con dos dedos (`Matrix`)
 - [x] Autoguardado y reabrir el proyecto
 - [x] Exportar PNG/JPG/WEBP/PDF con MediaStore
-- [ ] Capas: crear, ocultar, ordenar y cambiar opacidad (es lo más grande del bloque; si falta tiempo, pasa al Bloque 2)
+- [x] Capas: crear, ocultar, ordenar, seleccionar, eliminar con confirmación y cambiar opacidad (máximo 20; presupuesto de 256 MB)
 - [x] Pantalla de inicio/galería interna de proyectos
 - [x] Tamaños de lienzo predefinidos y personalizados hasta 4096 × 4096
 
@@ -213,7 +214,7 @@ Antes de implementar una función que afecte la arquitectura (capas, zoom, anima
 - [ ] Lienzos de tamaños predefinidos (cuadrado, vertical, 16:9) y papel de colores o cuadriculado
 
 ## Decisiones de diseño
-- El modelo JSON y `ProjectStorage` están preparados para una lista de capas, pero la interfaz/editor solo exponen una capa editable; todavía no hay controles para crear, seleccionar, ocultar, ordenar o cambiar la opacidad de varias capas. En el editor actual hay un único bitmap ARGB_8888 editable. Sobre ese bitmap, el trazo en curso se guarda como lista de puntos (x, y, ancho) y se redibuja en `onDraw` (acelerado por GPU, con `saveLayerAlpha` para aplicar la opacidad al trazo completo); al soltar el lápiz se confirma pintándolo una sola vez. El borrador usa `PorterDuff.Mode.DST_OUT`.
+- `LayerStack` mantiene bitmaps ARGB_8888 en orden de abajo hacia arriba; se dibuja únicamente en la capa activa. Cada trazo en curso se guarda como puntos (x, y, ancho) y se previsualiza en su posición de la pila; al soltar se confirma una sola vez. La opacidad de capa se aplica al componer y el borrador (`PorterDuff.Mode.DST_OUT`) solo modifica la capa activa.
 - Tamaño inicial predeterminado del lienzo: 1920 × 1080; cada proyecto admite dimensiones de 64 a 4096 px por lado.
 - Entrada del lápiz: `MotionEvent.getPressure()`, `getHistoricalX/Y` (puntos intermedios) y `getToolType()`.
   - `TOOL_TYPE_STYLUS` dibuja.
@@ -226,7 +227,8 @@ Antes de implementar una función que afecte la arquitectura (capas, zoom, anima
 - En `app/build.gradle.kts`, el alcance de optimización R8 de release se limita a `com.example.cstudio.**`. No incluir Kotlin/AndroidX en `packageScope`: hacerlo provocó un `IllegalAccessError` durante el arranque en release.
 - Guardado: almacenamiento interno de la app. Exportar PNG, JPG, WEBP y PDF con `MediaStore`.
 - Los proyectos viven en `filesDir/projects/<uuid>` con metadatos JSON versionados, capas PNG ARGB_8888 y miniaturas de 256×256. El autosave usa debounce de 2 segundos y también guarda al pausar la Activity.
-- El JSON y `ProjectStorage` conservan listas de capas extensibles; la interfaz/editor solo abre y edita una capa por proyecto. No asumir que las capas adicionales ya son visibles o editables desde la app.
+- El formato v2 no cambió. La pila limita a 20 capas y 256 MB de memoria viva; con lienzos de 4096 × 4096 el presupuesto permite hasta 4 capas. El historial global (20 entradas/64 MB) identifica el bitmap de cada entrada y descarta las entradas de una capa al eliminarla.
+- Posible optimización futura, no implementada: capas dispersas por mosaicos (tiles) en resolución completa y ARGB_8888. Reservar memoria solo para tiles con contenido ahorraría espacio en dibujos con áreas transparentes sin reducir calidad; los lienzos densamente pintados seguirían usando casi lo mismo. Comprimir tiles sin pérdida o descargarlos temporalmente a disco podría reducir más la RAM, a costa de complejidad y posible latencia. Requiere adaptar dibujo, historial, persistencia y exportación.
 - Rendimiento: no crear objetos dentro de `onDraw` ni de `onTouchEvent` (reutilizar `Path` y `Paint`). El `Bitmap` de la capa solo se modifica al terminar cada trazo, porque cada cambio obliga a subirlo completo a la GPU (no modificarlo en cada evento del lápiz). Usar `invalidate()` simple: el rectángulo sucio (`invalidate(l, t, r, b)`) está deprecado y Android moderno lo ignora.
 
 ## Cómo quiero que me ayudes (modo emergencia)
@@ -261,6 +263,7 @@ Los archivos de la app están en `CStudio/app/src/main/java/com/example/cstudio/
 - `brush/Brushes.kt`: lista los pinceles disponibles (Pincel y Borrador).
 - `brush/BrushSettings.kt`: agrupa color, tamaño, opacidad y pincel seleccionado.
 - `drawing/DrawingView.kt`: vista Android del lienzo, entrada táctil y coordinación de componentes.
+- `drawing/LayerStack.kt`: capas, orden, selección y límites de memoria.
 - `drawing/Viewport.kt`: matriz, zoom, desplazamiento, ajuste, conversión de coordenadas y anclaje al redimensionar.
 - `drawing/StrokeRenderer.kt`: presión, borrador, opacidad y curvas Bézier.
 - `drawing/History.kt`: historial de deshacer/rehacer, limitado por pasos y memoria.
@@ -278,6 +281,7 @@ Los archivos de la app están en `CStudio/app/src/main/java/com/example/cstudio/
 - `ui/ColorSliders.kt` y `ui/RecentColorsRow.kt`: controles de tono/brillo/alfa e historial reciente.
 - `ui/BrushOptions.kt`: controles de tamaño y opacidad.
 - `ui/ActionButtons.kt`: selección de pincel y acciones del lienzo.
+- `ui/LayersPanel.kt`: panel superpuesto para seleccionar, ordenar, crear, borrar, ocultar y ajustar opacidad de capas.
 - `ui/HomeScreen.kt`: pantalla inicial y galería con abrir, renombrar y borrar con confirmación.
 - `ui/NewProjectDialog.kt`: nombre, presets, dimensiones personalizadas y validación del nuevo lienzo.
 - `ui/ExportDialog.kt`: selección de formato, calidad y fondo de exportación.
@@ -307,6 +311,7 @@ La suite está en:
 - `app/src/androidTest/java/com/example/cstudio/ColorPickerInputTest.kt`
 - `app/src/test/java/com/example/cstudio/color/ColorUtilsTest.kt`
 - `app/src/androidTest/java/com/example/cstudio/HomeScreenInstrumentedTest.kt`
+- `app/src/androidTest/java/com/example/cstudio/LayersInstrumentedTest.kt`
 
 `ExampleInstrumentedTest.kt` cubre:
 
@@ -332,13 +337,14 @@ La suite está en:
 - Inicio en la galería y acción de nuevo proyecto.
 - Valor HD como preset predeterminado.
 
-Resultado validado el 26/11/2026:
+Resultado validado tras implementar capas:
 
 - `.\gradlew testDebugUnitTest`: 9 pruebas unitarias aprobadas.
-- `.\gradlew connectedDebugAndroidTest`: 35 pruebas instrumentadas aprobadas previamente en el Moto G85.
-- `.\gradlew :app:compileDebugAndroidTestKotlin` y `.\gradlew assembleRelease`: exitosos tras las correcciones recientes.
-- En el emulador API 37 pasaron 4 pruebas instrumentadas enfocadas: anclaje del viewport, límites reutilizados en historial, undo/redo y contabilización de memoria.
-- La ejecución completa actual del emulador API 37 corrió 37 pruebas; 7 pruebas UI fallaron al inicializar Espresso 3.5.1 por `NoSuchMethodException: InputManager.getInstance`. La suite completa debe repetirse con una versión de pruebas compatible con API 37; las 35 pruebas previas en Moto G85 habían pasado.
+- `.\gradlew assembleDebug` y `.\gradlew assembleRelease`: compilaciones exitosas.
+- `LayersInstrumentedTest`: 13/13 pruebas instrumentadas aprobadas en el emulador API 37.
+- Medición de miniatura en lienzo 4096 × 4096 con 2 capas: 9.176 ms en el emulador API 37 (referencia, no medición en Moto G85).
+- Suite completa en API 37: 50 pruebas, 43 aprobadas y 7 fallidas. Las 7 fallidas son pruebas UI que no inicializan Espresso 3.5.1 por `NoSuchMethodException: InputManager.getInstance`; las 13 pruebas de capas y las 30 de `ExampleInstrumentedTest` pasaron.
+- Las 35 pruebas instrumentadas anteriores habían pasado en el Moto G85. No se instalaron pruebas sobre el APK release firmado del teléfono para evitar borrar los proyectos locales.
 - APK release generado sin firmar: `CStudio/app/build/outputs/apk/release/app-release-unsigned.apk`.
 - El usuario generó e instaló un APK release firmado con Android Studio y confirmó que abre y funciona correctamente. El archivo de firma y sus contraseñas se guardan fuera del repositorio.
 
@@ -373,6 +379,8 @@ Hecho y probado en el celular:
 - [x] Historial de memoria reducida con undo/redo exacto
 - [x] Historial conserva límites de cada trazo al hacer undo/redo
 - [x] Límites básicos de zoom/pan y anclaje del lienzo al redimensionar
+- [x] Capas multicapa con agregar, borrar, reordenar, visibilidad, opacidad, renderizado, historial y persistencia
+- [x] Exportación, cuentagotas y miniaturas usan la composición visible de capas
 - [x] APK release firmado e instalado en el teléfono
 
 Pendiente de validar:
@@ -382,11 +390,11 @@ Pendiente de validar:
 Las demás funciones están en la lista de arriba.
 
 **Problema actual / último error:**
-El usuario confirma que el APK firmado funciona y que el selector/cuentagotas ya no desplazan el lienzo. En el emulador API 37, 7 pruebas UI siguen bloqueadas por incompatibilidad de Espresso 3.5.1 con `InputManager.getInstance`; no se observó un fallo funcional en las pruebas enfocadas.
+La suite completa en API 37 continúa teniendo 7 fallos de inicialización de Espresso (`InputManager.getInstance`); las 13 pruebas de capas y el resto de pruebas no UI sí pasaron. El APK release firmado que ya está instalado en el Moto G85 no fue reemplazado.
 
 ## Limitaciones conocidas y trabajo que puede parecer hecho pero no está terminado
 
-- El formato JSON y `ProjectStorage` admiten listas de capas y pueden guardarlas/cargarlas; la interfaz/editor solo muestra y modifica una capa. No hay controles de gestión multicapa.
+- El sistema multicapa pasó 13 pruebas en el emulador API 37, pero falta validación manual en una Samsung con S Pen y pruebas de estrés en el dispositivo objetivo para 20 capas y lienzos grandes.
 - El selector HSV y el cuentagotas del lienzo sí existen. Siguen pendientes las paletas personalizadas guardadas y el muestreo desde imágenes o desde otras apps.
 - No hay estabilizador, relleno, formas ni transformaciones.
 - No hay acción configurable para el botón del S Pen ni editor de curva de presión; el rechazo de palma aún no se ha validado en la tableta Samsung.

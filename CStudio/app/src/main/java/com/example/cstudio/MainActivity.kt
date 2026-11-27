@@ -43,6 +43,7 @@ import com.example.cstudio.brush.Brushes
 import com.example.cstudio.color.RecentColorsRepository
 import com.example.cstudio.drawing.DrawingView
 import com.example.cstudio.drawing.LayerInfo
+import com.example.cstudio.drawing.LayerStack
 import com.example.cstudio.drawing.LayerPixelSnapshot
 import com.example.cstudio.storage.AutoSaveDebouncer
 import com.example.cstudio.storage.ExportFormat
@@ -302,7 +303,13 @@ class MainActivity : ComponentActivity() {
                                         onOpacityChange = drawingView::setLayerOpacity,
                                         onAdd = {
                                             try {
-                                                if (!drawingView.addLayer()) {
+                                                if (drawingView.layerCount >= LayerStack.MAX_LAYERS) {
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        "Máximo de ${LayerStack.MAX_LAYERS} capas.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                } else if (!drawingView.addLayer()) {
                                                     Toast.makeText(
                                                         this@MainActivity,
                                                         "No hay memoria para más capas en este lienzo.",

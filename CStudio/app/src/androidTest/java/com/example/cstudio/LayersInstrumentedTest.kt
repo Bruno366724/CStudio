@@ -389,6 +389,27 @@ class LayersInstrumentedTest {
     }
 
     @Test
+    fun measureProjectStorageInitializationWithThirtyProjects() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(context.cacheDir, "storage-startup-${UUID.randomUUID()}")
+        val setupStorage = ProjectStorage(root)
+        try {
+            repeat(30) { index ->
+                setupStorage.createProject("Proyecto $index", 64, 64)
+                    .layers
+                    .forEach(Bitmap::recycle)
+            }
+            val started = SystemClock.elapsedRealtimeNanos()
+            ProjectStorage(root)
+            val durationMs = (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000f
+            Log.i("ProjectStorageStartupTest", "Constructor con 30 proyectos: ${durationMs}ms")
+            assertEquals(30, File(root, "projects").listFiles()?.count { it.isDirectory })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun storageRoundTripsLayerMetadataAndRemovesDeletedLayerFiles() = runBlocking(Dispatchers.IO) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val root = File(context.cacheDir, "layers-${UUID.randomUUID()}")

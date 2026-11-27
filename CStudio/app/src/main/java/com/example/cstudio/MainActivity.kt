@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -107,6 +108,7 @@ class MainActivity : ComponentActivity() {
     private var activeLayerIndex by mutableStateOf(0)
     private var eyedropperMode by mutableStateOf(false)
     private var pendingExportOptions: ExportOptions? = null
+    private var lastBlockedToastMillis: Long? = null
     private var isBusy = false
     private var dirty = false
     private var replacingProject = false
@@ -151,7 +153,12 @@ class MainActivity : ComponentActivity() {
             }
         }
         drawingView.onBlockedDrawing = {
-            Toast.makeText(this, "La capa está oculta.", Toast.LENGTH_SHORT).show()
+            val now = SystemClock.elapsedRealtime()
+            val lastShown = lastBlockedToastMillis
+            if (lastShown == null || now - lastShown >= BLOCKED_DRAWING_TOAST_INTERVAL_MS) {
+                lastBlockedToastMillis = now
+                Toast.makeText(this, "La capa está oculta.", Toast.LENGTH_SHORT).show()
+            }
         }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -809,6 +816,7 @@ class MainActivity : ComponentActivity() {
     private companion object {
         private val PROCESS_PROJECT_MUTEX = Mutex()
         const val AUTO_SAVE_DELAY_MS = 2_000L
+        const val BLOCKED_DRAWING_TOAST_INTERVAL_MS = 2_000L
         const val STATE_SCREEN = "screen"
         const val STATE_PROJECT_ID = "project_id"
         const val COLOR_PREFERENCES_NAME = "cstudio_color_picker"
